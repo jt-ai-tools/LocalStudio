@@ -42,6 +42,7 @@ import { ImageMarker } from "./image-marker";
 import { audioDownloadUrl } from "@/lib/tts";
 import TtsStudio from "./tts-studio";
 import EnhanceStudio from "./enhance-studio";
+import GenerationQueuePanel from "./generation-queue-panel";
 import { createGenerationQueue, GenerationJob } from "@/lib/generation-queue";
 
 type View = "create" | "edit" | "works" | "tts";
@@ -984,28 +985,9 @@ export default function Home() {
         <div className="local-label"><span className="status-dot" />LOCAL</div>
       </aside>
 
-      <section className="content">
-        {generationJobs.length > 0 && (
-          <section className="generation-queue" aria-label="生成佇列">
-            <div className="section-heading"><h2>生成佇列</h2><span>等待中 {generationJobs.filter((job) => job.status === "waiting").length} 筆</span></div>
-            <p className="queue-note">依加入順序執行。重新整理或關閉網頁會清除尚未執行的任務。</p>
-            <ol>
-              {generationJobs.map((job) => (
-                <li key={job.id}>
-                  <div className="queue-job">
-                    <strong title={job.label}>{job.label}</strong>
-                    <span>{job.status === "running" ? `執行中 · ${elapsed} 秒` : job.status === "failed" ? "失敗" : "等待中"}</span>
-                    {job.status !== "running" && <button type="button" onClick={() => generationQueue.remove(job.id)}>{job.status === "failed" ? "清除" : "移除"}</button>}
-                  </div>
-                  <p role={job.status === "failed" ? "alert" : "status"}>{job.message}</p>
-                </li>
-              ))}
-            </ol>
-          </section>
-        )}
-        {view === "create" ? (
-          <>
-            <div className="hero">
+      <section className={`content${generationJobs.length ? " has-generation-queue" : ""}`}>
+        {view === "create" ? <>
+          <div className="hero">
               <p className="eyebrow">MINIMAX H3 · LOCAL</p>
               <h1>讓靈感，躍然成片</h1>
               <p>文字、首尾幀或多圖參考，在你的 RTX 4080 Laptop 上生成有聲影片。</p>
@@ -1017,7 +999,15 @@ export default function Home() {
               <button className={!enhancementMode && sourceMode === "reference" ? "active" : ""} onClick={() => { setEnhancementMode(false); chooseSourceMode("reference"); }} disabled={Boolean(continuationSource) || isGeneratingH3Image || enhancementBusy}>參考生影片</button>
               <button className={enhancementMode ? "active" : ""} onClick={() => setEnhancementMode(true)} disabled={Boolean(continuationSource) || isGenerating || enhancementBusy}>影片畫質提升</button>
             </div>
-
+        </> : view === "edit" ? <div className="hero">
+              <p className="eyebrow">QWEN-IMAGE 2.1 · LOCAL</p>
+              <h1>圖像編輯</h1>
+              <p>用文字生成圖像，或上傳圖片後用一句指令編輯；擅長文字排版與多圖參考。</p>
+            </div> : null}
+        <div className={`studio-workspace${generationJobs.length ? " with-queue" : ""}`}>
+          <div className="studio-editor">
+        {view === "create" ? (
+          <>
             {enhancementMode ? <EnhanceStudio videos={videoWorks} connected={connected} disabled={isGenerating} onBusyChange={setEnhancementBusy} onComplete={() => void refreshHistory()} /> : <>
             <section className="composer" aria-label="影片生成設定">
               {continuationSource && (
@@ -1409,12 +1399,6 @@ export default function Home() {
           </>
         ) : view === "edit" ? (
           <>
-            <div className="hero">
-              <p className="eyebrow">QWEN-IMAGE 2.1 · LOCAL</p>
-              <h1>圖像編輯</h1>
-              <p>用文字生成圖像，或上傳圖片後用一句指令編輯；擅長文字排版與多圖參考。</p>
-            </div>
-
             <section className="composer" aria-label="圖像編輯設定">
               <div className="qwen-upload-section">
                 <p>{qwenCameraEnabled ? "上傳一張原圖後，透過下方的攝影機視角選項生成新的觀看角度。" : "不加圖片就是文字生圖；加了圖片後輸出會依第一張的比例，描述裡打 @ 就能挑要指定哪一張（插入 <image1>、<image2>）。"}</p>
@@ -1689,6 +1673,9 @@ export default function Home() {
           setVideos((current) => [audio, ...current.filter((item) => item.filename !== audio.filename || item.subfolder !== audio.subfolder)]);
           setWorksTab("audio");
         }} />}
+          </div>
+          {generationJobs.length > 0 && <GenerationQueuePanel jobs={generationJobs} elapsed={elapsed} onRemove={generationQueue.remove} />}
+        </div>
       </section>
 
       {markerImage && (

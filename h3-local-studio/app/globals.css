@@ -431,18 +431,37 @@ button { color: inherit; }
 .enhancement-times { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .enhancement-fields .error-message { color: #ff9b9b; }
 @media (max-width: 600px) { .mode-tabs { grid-template-columns: repeat(2,1fr); } .enhancement-fields { padding: 16px; } }
-.generation-queue {
-  margin-bottom: 24px;
-  padding: 20px;
-  border: 1px solid var(--line);
-  border-radius: 16px;
+.studio-editor { min-width: 0; }
+.content.has-generation-queue { padding-left: 28px; padding-right: 28px; }
+.studio-workspace.with-queue { display: grid; grid-template-columns: minmax(0,1030px) 300px; gap: 24px; justify-content: center; align-items: start; }
+.generation-queue { position: sticky; top: 84px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.queue-heading h2 { margin: 0; font-size: 16px; }
+.queue-heading > span, .queue-note { color: var(--muted); font-size: 12px; }
+.queue-note { margin: 10px 0 14px; line-height: 1.6; }
+.generation-queue ol { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 230px); overflow-y: auto; }
+.generation-queue li { padding: 12px 0; border-top: 1px solid var(--line); }
+.queue-job-heading, .queue-job-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.queue-job-actions { margin-top: 10px; }
+.queue-type { flex-shrink: 0; border: 1px solid; border-radius: 6px; padding: 3px 7px; font-size: 11px; font-weight: 700; }
+.queue-type.h3 { color: #c8b8ff; border-color: #5a4387; background: #29203e; }
+.queue-type.qwen { color: #97dfeb; border-color: #32616c; background: #152e35; }
+.queue-state { color: var(--muted); font-size: 11px; }
+.queue-state.running { color: var(--green); }
+.queue-state.failed, .queue-failure { color: #ff9b9b; }
+.queue-summary { min-width: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 13px; text-align: left; cursor: help; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-summary:focus-visible { outline: 2px solid var(--purple-2); outline-offset: 3px; border-radius: 3px; }
+.queue-remove { flex-shrink: 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); font-size: 11px; cursor: pointer; }
+.queue-tooltip { position: fixed; z-index: 40; width: min(420px,calc(100vw - 24px)); padding: 16px; border: 1px solid #494153; border-radius: 12px; background: #1a1823; box-shadow: 0 12px 40px rgba(0,0,0,.5); overflow-y: auto; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.queue-tooltip strong { font-size: 12px; color: #c8b8ff; }
+.queue-full-prompt { white-space: pre-wrap; margin: 10px 0; }
+.queue-message { margin: 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); }
+.queue-failure { display: block; margin-top: 8px; font-size: 11px; }
+@media (max-width: 1200px) {
+  .studio-workspace.with-queue { grid-template-columns: minmax(0,1fr); }
+  .generation-queue { position: static; }
+  .generation-queue ol { max-height: 320px; }
 }
-
-.generation-queue h2 { margin: 0; font-size: 18px; }
-.generation-queue ol { margin: 0; padding-left: 24px; }
-.generation-queue li { padding: 12px 0; }
-.generation-queue li p, .queue-note { font-size: 13px; overflow-wrap: anywhere; }
-.queue-job { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.queue-job strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-job span { font-size: 13px; }
-.queue-job button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); cursor: pointer; }
+@media (max-width: 640px) {
+  .content.has-generation-queue { padding-left: 14px; padding-right: 14px; }
+}
