@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildReferencePrompt,
   checkConnection,
@@ -15,6 +15,7 @@ import {
   getRecentVideos,
   inputImageUrl,
   MIN_COOLDOWN_SECONDS,
+  DEFAULT_COOLDOWN_SECONDS,
   optimizeQwenImagePrompt,
   optimizeVideoPrompt,
   outputUrl,
@@ -27,13 +28,21 @@ import {
   QWEN_MIN_COOLDOWN_SECONDS,
   QwenAspect,
   QwenSize,
+  QwenCamera,
+  QWEN_CAMERA_AZIMUTHS,
+  QWEN_CAMERA_ELEVATIONS,
+  QWEN_CAMERA_LORA,
+  QWEN_DEFAULT_CAMERA,
   ReferenceImageInput,
   resolveImageDimensions,
   resolveOutputDimensions,
 } from "@/lib/comfy";
 import { CropRect, cropImageFile, ImageCropper, readImageDimensions } from "./image-cropper";
+import { ImageMarker } from "./image-marker";
 import { audioDownloadUrl } from "@/lib/tts";
 import TtsStudio from "./tts-studio";
+import EnhanceStudio from "./enhance-studio";
+import { createGenerationQueue, GenerationJob } from "@/lib/generation-queue";
 
 type View = "create" | "edit" | "works" | "tts";
 type SourceMode = "text" | "image" | "reference";
@@ -55,6 +64,8 @@ type QwenImageDraft = {
   file: File;
   /** The image as chosen, before any crop. Kept so the crop can be redone. */
   originalFile: File;
+  /** The crop base includes any marks applied to the current image. */
+  cropSourceFile: File;
   crop: CropRect | null;
   preview: string;
 };
@@ -74,6 +85,8 @@ export default function Home() {
   const [view, setView] = useState<View>("create");
   const [worksTab, setWorksTab] = useState<"video" | "image" | "audio">("video");
   const [sourceMode, setSourceMode] = useState<SourceMode>("text");
+  const [enhancementMode, setEnhancementMode] = useState(false);
+  const [enhancementBusy, setEnhancementBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [profile, setProfile] = useState<GenerationOptions["profile"]>("fast");
@@ -82,7 +95,7 @@ export default function Home() {
   const [aspect, setAspect] = useState<GenerationOptions["aspect"]>("16:9");
   const [soundEnabled, setSoundEnabled] = useState(true);
   // Per-step cooldown seconds; defaults to the last successful run once history loads.
-  const [cooldownSeconds, setCooldownSeconds] = useState(MIN_COOLDOWN_SECONDS);
+  const [cooldownSeconds, setCooldownSeconds] = useState(DEFAULT_COOLDOWN_SECONDS);
   const cooldownInitialized = useRef(false);
   // Empty means "pick a fresh random seed"; a number reproduces an earlier run.
   const [seed, setSeed] = useState("");
@@ -101,13 +114,23 @@ export default function Home() {
   const [lastImageDimensions, setLastImageDimensions] = useState<ImageDimensions | null>(null);
   const [referenceImages, setReferenceImages] = useState<ReferenceImageDraft[]>([emptyReferenceImage(1)]);
   const [cropTarget, setCropTarget] = useState<CropTarget | null>(null);
+  const [markerId, setMarkerId] = useState<number | null>(null);
   const nextReferenceId = useRef(2);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingH3Image, setIsGeneratingH3Image] = useState(false);
+  const [generationJobs, setGenerationJobs] = useState<GenerationJob[]>([]);
+  const activeJob = generationJobs.find((job) => job.status === "running");
+  const queueBusy = generationJobs.some((job) => job.status !== "failed");
+  const isGenerating = isGeneratingH3Image || queueBusy;
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [promptEngine, setPromptEngine] = useState<PromptEngine>("codex");
   const [promptBeforeOptimization, setPromptBeforeOptimization] = useState<string | null>(null);
   const [optimizedPromptMode, setOptimizedPromptMode] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [generationQueue] = useState(() => createGenerationQueue((jobs) => {
+    setGenerationJobs(jobs);
+    const running = jobs.find((job) => job.status === "running");
+    if (running?.startedAt) setElapsed(Math.floor((Date.now() - running.startedAt) / 1000));
+  }));
   const [statusText, setStatusText] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -124,6 +147,8 @@ export default function Home() {
   const [qwenCount, setQwenCount] = useState(1);
   const [qwenCooldownSeconds, setQwenCooldownSeconds] = useState(QWEN_DEFAULT_COOLDOWN_SECONDS);
   const [qwenFast, setQwenFast] = useState(false);
+  const [qwenCameraEnabled, setQwenCameraEnabled] = useState(false);
+  const [qwenCamera, setQwenCamera] = useState<QwenCamera>(QWEN_DEFAULT_CAMERA);
   const [qwenImages, setQwenImages] = useState<QwenImageDraft[]>([]);
   const nextQwenImageId = useRef(1);
   const qwenPromptRef = useRef<HTMLTextAreaElement>(null);
@@ -180,10 +205,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!isGenerating) return;
-    const startedAt = Date.now();
+    const startedAt = activeJob?.startedAt ?? Date.now();
     const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
     return () => window.clearInterval(timer);
-  }, [isGenerating]);
+  }, [isGenerating, activeJob?.id, activeJob?.startedAt]);
 
   useEffect(() => {
     return () => {
@@ -231,8 +256,33 @@ export default function Home() {
         .map((reference) => reference.label.replace(/^@+/, "").trim())
     : [], [referenceImages, sourceMode]);
 
-  async function chooseImage(event: ChangeEvent<HTMLInputElement>, position: "first" | "last") {
-    const file = event.target.files?.[0] ?? null;
+  function imageDropHandlers(onFiles: (files: File[]) => void, disabled = false) {
+    return {
+      onDragOver(event: DragEvent<HTMLLabelElement>) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = disabled ? "none" : "copy";
+      },
+      onDrop(event: DragEvent<HTMLLabelElement>) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (disabled) return;
+        const files = Array.from(event.dataTransfer.files).filter((file) =>
+          ["image/png", "image/jpeg", "image/webp"].includes(file.type)
+          || (!file.type && /\.(png|jpe?g|webp)$/i.test(file.name)),
+        );
+        if (!files.length) {
+          setError("請拖入 JPG、PNG 或 WebP 圖片。 ");
+          return;
+        }
+        setError("");
+        onFiles(files);
+      },
+    };
+  }
+
+  async function chooseImage(file: File | null, position: "first" | "last") {
+    setPromptBeforeOptimization(null);
+    setOptimizedPromptMode(null);
     const previousPreview = position === "first" ? firstImagePreview : lastImagePreview;
     if (previousPreview) URL.revokeObjectURL(previousPreview);
     if (position === "first") {
@@ -260,8 +310,7 @@ export default function Home() {
     }
   }
 
-  async function chooseReferenceImage(event: ChangeEvent<HTMLInputElement>, id: number) {
-    const file = event.target.files?.[0] ?? null;
+  async function chooseReferenceImage(file: File | null, id: number) {
     const current = referenceImages.find((reference) => reference.id === id);
     if (current?.preview) URL.revokeObjectURL(current.preview);
     setReferenceImages((references) => references.map((reference) =>
@@ -286,7 +335,7 @@ export default function Home() {
 
   function croppableFile(target: CropTarget) {
     if (target.kind === "reference") return referenceImages.find((reference) => reference.id === target.id)?.originalFile ?? null;
-    if (target.kind === "qwen") return qwenImages.find((image) => image.id === target.id)?.originalFile ?? null;
+    if (target.kind === "qwen") return qwenImages.find((image) => image.id === target.id)?.cropSourceFile ?? null;
     return target.kind === "first" ? firstImageOriginal : lastImageOriginal;
   }
 
@@ -305,7 +354,7 @@ export default function Home() {
       setQwenImages((images) => images.map((image) => {
         if (image.id !== target.id) return image;
         URL.revokeObjectURL(image.preview);
-        return { ...image, file, crop, preview };
+        return { ...image, file, crop, preview, cropSourceFile: file === image.originalFile ? file : image.cropSourceFile };
       }));
       return;
     }
@@ -336,7 +385,9 @@ export default function Home() {
   }
 
   async function restoreOriginalImage(target: CropTarget) {
-    const original = croppableFile(target);
+    const original = target.kind === "qwen"
+      ? qwenImages.find((image) => image.id === target.id)?.originalFile
+      : croppableFile(target);
     if (!original) return;
     try {
       applyImage(target, original, await readImageDimensions(original), null);
@@ -411,11 +462,11 @@ export default function Home() {
       setError("圖片轉影片至少需要選擇首幀或尾幀圖片。 ");
       return;
     }
-    if (!continuationSource && sourceMode === "image" && firstImageFile && !firstImageDimensions) {
+    if (!continuationSource && sourceMode !== "text" && firstImageFile && !firstImageDimensions) {
       setError("尚未讀取到首幀圖片尺寸，請重新選擇圖片。 ");
       return;
     }
-    if (!continuationSource && sourceMode === "image" && lastImageFile && !lastImageDimensions) {
+    if (!continuationSource && sourceMode !== "text" && lastImageFile && !lastImageDimensions) {
       setError("尚未讀取到尾幀圖片尺寸，請重新選擇圖片。 ");
       return;
     }
@@ -429,46 +480,43 @@ export default function Home() {
       return;
     }
 
-    setError("");
-    setNotice("");
-    setElapsed(0);
-    setStatusText("正在送入本機 H3 佇列…");
-    setIsGenerating(true);
-    try {
-      const result = await createVideo(
-        {
-          prompt: sourceMode === "reference" && optimizedPromptMode !== "Ref2VA"
-            ? buildReferencePrompt(
-                continuationSource ? `Continue seamlessly from the supplied first-frame anchor. ${prompt.trim()}` : prompt,
-                referenceDefinitions,
-              )
-            : prompt.trim(),
-          profile, resolution, duration, aspect, sound: soundEnabled, sourceMode,
-          cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, cooldownSeconds),
-          seed: seed.trim() ? Number(seed) : undefined,
-          extraLoras: extraLoras.length ? extraLoras.map(({ name, strength }) => ({ name, strength })) : undefined,
-          inputMode: sourceMode === "reference" ? "reference" : "standard",
-          sourceWidth: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.width : undefined,
-          sourceHeight: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.height : undefined,
-          outputWidth: continuationSource?.width,
-          outputHeight: continuationSource?.height,
-          continuationSource: continuationSource ?? undefined,
-        },
-        !continuationSource && sourceMode === "image" ? firstImageFile : null,
-        !continuationSource && sourceMode === "image" ? lastImageFile : null,
-        (phase) => setStatusText(phase),
-        references,
-      );
-      setVideos((current) => [result, ...current.filter((item) => item.filename !== result.filename)]);
-      setStatusText(continuationSource ? "延伸影片已完成並無縫接到原片尾端。 " : "影片已完成並儲存到 ComfyUI output/video。 ");
-      setContinuationSource(null);
-      setView("works");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "生成失敗，請查看 ComfyUI 視窗。 ");
-    } finally {
-      setIsGenerating(false);
-      void refreshHistory();
+    const label = continuationSource ? `延伸影片 · ${continuationSource.filename}` : `H3 影片 · ${prompt.trim()}`;
+    if (continuationSource && generationJobs.some((job) => job.label === label && job.status !== "failed")) {
+      setError("同一支原片的延伸任務尚未完成，請等完成後再加入另一筆延伸。");
+      return;
     }
+    const options: GenerationOptions = {
+      prompt: sourceMode === "reference" && optimizedPromptMode !== "Ref2VA"
+        ? buildReferencePrompt(
+            continuationSource ? `Continue seamlessly from the supplied first-frame anchor. ${prompt.trim()}` : prompt,
+            referenceDefinitions,
+          )
+        : prompt.trim(),
+      profile, resolution, duration, aspect, sound: soundEnabled, sourceMode,
+      cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, cooldownSeconds),
+      seed: seed.trim() ? Number(seed) : undefined,
+      extraLoras: extraLoras.length ? extraLoras.map(({ name, strength }) => ({ name, strength })) : undefined,
+      inputMode: sourceMode === "reference" ? "reference" : "standard",
+      sourceWidth: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.width : undefined,
+      sourceHeight: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.height : undefined,
+      outputWidth: continuationSource?.width,
+      outputHeight: continuationSource?.height,
+      continuationSource: continuationSource ? structuredClone(continuationSource) : undefined,
+    };
+    const firstImage = !continuationSource && sourceMode !== "text" ? firstImageFile : null;
+    const lastImage = !continuationSource && sourceMode !== "text" ? lastImageFile : null;
+    setError("");
+    setNotice("已加入生成佇列。");
+    setContinuationSource(null);
+    generationQueue.add(label, async (onStatus) => {
+      try {
+        const result = await createVideo(options, firstImage, lastImage, onStatus, references);
+        setVideos((current) => [result, ...current.filter((item) => item.filename !== result.filename)]);
+        setNotice("H3 影片已完成。");
+      } finally {
+        void refreshHistory();
+      }
+    });
   }
 
   async function generateImage() {
@@ -483,7 +531,7 @@ export default function Home() {
     setNotice("");
     setElapsed(0);
     setStatusText("正在送入本機 H3 佇列…");
-    setIsGenerating(true);
+    setIsGeneratingH3Image(true);
     try {
       const result = await createImage(
         {
@@ -506,19 +554,17 @@ export default function Home() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "生成失敗，請查看 ComfyUI 視窗。 ");
     } finally {
-      setIsGenerating(false);
+      setIsGeneratingH3Image(false);
       void refreshHistory();
     }
   }
 
-  function chooseQwenImages(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
+  function chooseQwenImages(files: File[]) {
     setQwenPromptBeforeOptimization(null);
     setQwenImages((current) => [
       ...current,
       ...files.slice(0, Math.max(0, QWEN_MAX_IMAGES - current.length)).map((file) => ({
-        id: nextQwenImageId.current++, file, originalFile: file, crop: null, preview: URL.createObjectURL(file),
+        id: nextQwenImageId.current++, file, originalFile: file, cropSourceFile: file, crop: null, preview: URL.createObjectURL(file),
       })),
     ]);
   }
@@ -580,37 +626,35 @@ export default function Home() {
   }
 
   async function generateQwenImage() {
-    if (!qwenPrompt.trim()) {
+    if (qwenCameraEnabled && qwenImages.length !== 1) {
+      setError("攝影機視角請只上傳一張原圖。");
+      return;
+    }
+    if (!qwenCameraEnabled && !qwenPrompt.trim()) {
       setError(qwenImages.length ? "請先描述要怎麼編輯這些圖片。 " : "請先描述想生成的圖像。 ");
       return;
     }
+    const options = {
+      prompt: qwenPrompt.trim(), aspect: qwenAspect, size: qwenSize, steps: qwenSteps,
+      seed: qwenSeed.trim() ? Number(qwenSeed) : undefined,
+      cooldownSeconds: Math.max(QWEN_MIN_COOLDOWN_SECONDS, qwenCooldownSeconds),
+      count: qwenCount,
+      fast: qwenFast,
+      camera: qwenCameraEnabled ? { ...qwenCamera } : undefined,
+    };
+    const images = qwenImages.map((image) => image.file);
     setError("");
-    setNotice("");
-    setElapsed(0);
-    setStatusText("正在送入本機 Qwen 佇列…");
-    setIsGenerating(true);
-    try {
-      const results = await createQwenImage(
-        {
-          prompt: qwenPrompt.trim(), aspect: qwenAspect, size: qwenSize, steps: qwenSteps,
-          seed: qwenSeed.trim() ? Number(qwenSeed) : undefined,
-          cooldownSeconds: Math.max(QWEN_MIN_COOLDOWN_SECONDS, qwenCooldownSeconds),
-          count: qwenCount,
-          fast: qwenFast,
-        },
-        qwenImages.map((image) => image.file),
-        (phase) => setStatusText(phase),
-        (result) => setVideos((current) => [result, ...current.filter((item) => item.filename !== result.filename)]),
-      );
-      setStatusText(results.length > 1 ? `${results.length} 張圖像已完成並儲存到 ComfyUI output/H3_Image。 ` : "圖像已完成並儲存到 ComfyUI output/H3_Image。 ");
-      setWorksTab("image");
-      setView("works");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "生成失敗，請查看 ComfyUI 視窗。 ");
-    } finally {
-      setIsGenerating(false);
-      void refreshHistory();
-    }
+    setNotice("已加入生成佇列。");
+    generationQueue.add(`Qwen 圖片 · ${qwenCameraEnabled ? "新視角" : options.prompt} · ${qwenCount} 張`, async (onStatus) => {
+      try {
+        const results = await createQwenImage(options, images, onStatus,
+          (result) => setVideos((current) => [result, ...current.filter((item) => item.filename !== result.filename)]),
+        );
+        setNotice(`${results.length} 張 Qwen 圖片已完成。`);
+      } finally {
+        void refreshHistory();
+      }
+    });
   }
 
   async function optimizeQwenPrompt() {
@@ -660,8 +704,8 @@ export default function Home() {
         original.trim(),
         duration,
         soundEnabled,
-        !continuationSource && sourceMode === "image" ? firstImageFile : null,
-        !continuationSource && sourceMode === "image" ? lastImageFile : null,
+        !continuationSource && sourceMode !== "text" ? firstImageFile : null,
+        !continuationSource && sourceMode !== "text" ? lastImageFile : null,
         references,
         promptEngine,
       );
@@ -695,6 +739,7 @@ export default function Home() {
       setView("edit");
     } else {
       setSeed(String(value));
+      setEnhancementMode(false);
       setView("create");
     }
     setNotice(`已套用種子 ${value}，同樣設定下會重現相同的畫面。`);
@@ -718,6 +763,7 @@ export default function Home() {
       throw new Error("這支舊作品沒有保存完整生成設定，無法載入。 ");
     }
 
+    setEnhancementMode(false);
     const warnings: string[] = [];
     const inferredSourceMode: SourceMode = video.inputMode === "reference"
       ? "reference"
@@ -822,6 +868,7 @@ export default function Home() {
 
   function extendVideo(video: GeneratedVideo) {
     if (!video.extendable || !video.profile || !video.resolution || video.sound === undefined || !video.width || !video.height) return;
+    setEnhancementMode(false);
     setContinuationSource(video);
     setSourceMode(video.inputMode === "reference" ? "reference" : "text");
     setProfile(video.inputMode === "reference" ? "cooled-turbo-8" : "quality");
@@ -851,14 +898,19 @@ export default function Home() {
     qwenImages.forEach((item) => URL.revokeObjectURL(item.preview));
     // A restored image is whatever was sent last time, so it is its own original.
     setQwenImages(restored.flatMap((item) => (item
-      ? [{ id: nextQwenImageId.current++, file: item.file, originalFile: item.file, crop: null, preview: item.preview }]
+      ? [{ id: nextQwenImageId.current++, file: item.file, originalFile: item.file, cropSourceFile: item.file, crop: null, preview: item.preview }]
       : [])));
-    setQwenPrompt(image.prompt);
+    setQwenPrompt(image.qwenCamera ? "" : image.prompt);
     setQwenPromptBeforeOptimization(null);
     if (image.qwenAspect) setQwenAspect(image.qwenAspect);
     if (image.qwenSize) setQwenSize(image.qwenSize);
     if (image.steps) setQwenSteps(image.steps);
     setQwenFast(image.qwenFast === true);
+    setQwenCameraEnabled(Boolean(image.qwenCamera));
+    setQwenCamera(image.qwenCamera ? {
+      ...image.qwenCamera,
+      strength: image.qwenCamera.strength ?? image.extraLoras?.find((item) => item.name === QWEN_CAMERA_LORA)?.strength ?? 1,
+    } : QWEN_DEFAULT_CAMERA);
     if (typeof image.cooldownSeconds === "number") setQwenCooldownSeconds(Math.max(QWEN_MIN_COOLDOWN_SECONDS, image.cooldownSeconds));
     setQwenSeed(image.seed === undefined ? "" : String(image.seed));
     setError("");
@@ -887,13 +939,14 @@ export default function Home() {
   }
 
   const navItems: Array<{ id: View; icon: string; label: string }> = [
-    { id: "create", icon: "✦", label: "創作" },
+    { id: "create", icon: "✦", label: "創作影片" },
     { id: "edit", icon: "✎", label: "圖像編輯" },
     { id: "tts", icon: "♫", label: "語音生成" },
     { id: "works", icon: "▦", label: "作品" },
   ];
 
   const cropFile = cropTarget ? croppableFile(cropTarget) : null;
+  const markerImage = qwenImages.find((image) => image.id === markerId);
   const cropReferenceIndex = cropTarget?.kind === "reference"
     ? referenceImages.findIndex((reference) => reference.id === cropTarget.id) + 1
     : cropTarget?.kind === "qwen"
@@ -919,6 +972,7 @@ export default function Home() {
             <button
               className={view === item.id ? "nav-item active" : "nav-item"}
               key={item.id}
+              disabled={enhancementBusy}
               onClick={() => setView(item.id)}
               title={item.label}
             >
@@ -931,6 +985,24 @@ export default function Home() {
       </aside>
 
       <section className="content">
+        {generationJobs.length > 0 && (
+          <section className="generation-queue" aria-label="生成佇列">
+            <div className="section-heading"><h2>生成佇列</h2><span>等待中 {generationJobs.filter((job) => job.status === "waiting").length} 筆</span></div>
+            <p className="queue-note">依加入順序執行。重新整理或關閉網頁會清除尚未執行的任務。</p>
+            <ol>
+              {generationJobs.map((job) => (
+                <li key={job.id}>
+                  <div className="queue-job">
+                    <strong title={job.label}>{job.label}</strong>
+                    <span>{job.status === "running" ? `執行中 · ${elapsed} 秒` : job.status === "failed" ? "失敗" : "等待中"}</span>
+                    {job.status !== "running" && <button type="button" onClick={() => generationQueue.remove(job.id)}>{job.status === "failed" ? "清除" : "移除"}</button>}
+                  </div>
+                  <p role={job.status === "failed" ? "alert" : "status"}>{job.message}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
         {view === "create" ? (
           <>
             <div className="hero">
@@ -940,11 +1012,13 @@ export default function Home() {
             </div>
 
             <div className="mode-tabs" role="tablist" aria-label="生成來源">
-              <button className={sourceMode === "text" ? "active" : ""} onClick={() => chooseSourceMode("text")} disabled={Boolean(continuationSource)}>文字轉影片</button>
-              <button className={sourceMode === "image" ? "active" : ""} onClick={() => chooseSourceMode("image")} disabled={Boolean(continuationSource)}>首尾圖生影片</button>
-              <button className={sourceMode === "reference" ? "active" : ""} onClick={() => chooseSourceMode("reference")} disabled={Boolean(continuationSource)}>參考生影片</button>
+              <button className={!enhancementMode && sourceMode === "text" ? "active" : ""} onClick={() => { setEnhancementMode(false); chooseSourceMode("text"); }} disabled={Boolean(continuationSource) || isGeneratingH3Image || enhancementBusy}>文字轉影片</button>
+              <button className={!enhancementMode && sourceMode === "image" ? "active" : ""} onClick={() => { setEnhancementMode(false); chooseSourceMode("image"); }} disabled={Boolean(continuationSource) || isGeneratingH3Image || enhancementBusy}>首尾圖生影片</button>
+              <button className={!enhancementMode && sourceMode === "reference" ? "active" : ""} onClick={() => { setEnhancementMode(false); chooseSourceMode("reference"); }} disabled={Boolean(continuationSource) || isGeneratingH3Image || enhancementBusy}>參考生影片</button>
+              <button className={enhancementMode ? "active" : ""} onClick={() => setEnhancementMode(true)} disabled={Boolean(continuationSource) || isGenerating || enhancementBusy}>影片畫質提升</button>
             </div>
 
+            {enhancementMode ? <EnhanceStudio videos={videoWorks} connected={connected} disabled={isGenerating} onBusyChange={setEnhancementBusy} onComplete={() => void refreshHistory()} /> : <>
             <section className="composer" aria-label="影片生成設定">
               {continuationSource && (
                 <div className="continuation-banner">
@@ -959,12 +1033,12 @@ export default function Home() {
                   <button onClick={() => setContinuationSource(null)}>取消延伸</button>
                 </div>
               )}
-              {!continuationSource && sourceMode === "image" && (
+              {!continuationSource && (sourceMode === "image" || sourceMode === "reference") && (
                 <div className="keyframe-upload-section">
-                  <p>首圖與尾圖至少選擇一張；只選尾圖也能生成。</p>
+                  <p>{sourceMode === "reference" ? "首圖與尾圖皆選填；不選就是純參考生影片。首尾圖控制開頭與結尾，其他參考圖用來指定人物、物件或風格。" : "首圖與尾圖至少選擇一張；只選尾圖也能生成。"}</p>
                   <div className="keyframe-upload-grid">
-                    <label className="image-dropzone" htmlFor="first-frame-upload">
-                      <input id="first-frame-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void chooseImage(event, "first")} />
+                    <label className="image-dropzone" htmlFor="first-frame-upload" {...imageDropHandlers((files) => void chooseImage(files[0], "first"))}>
+                      <input id="first-frame-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { void chooseImage(event.target.files?.[0] ?? null, "first"); event.target.value = ""; }} />
                       {firstImagePreview ? (
                         <>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -974,18 +1048,19 @@ export default function Home() {
                             hasCrop={Boolean(firstImageCrop)}
                             onCrop={() => setCropTarget({ kind: "first" })}
                             onRestore={() => void restoreOriginalImage({ kind: "first" })}
+                            onRemove={() => void chooseImage(null, "first")}
                           />
                         </>
                       ) : (
                         <>
                           <span className="upload-icon">＋</span>
                           <strong>選擇首幀圖片</strong>
-                          <small>選填 · 控制影片起始畫面</small>
+                          <small>可點選或拖入圖片 · 控制影片起始畫面</small>
                         </>
                       )}
                     </label>
-                    <label className="image-dropzone" htmlFor="last-frame-upload">
-                      <input id="last-frame-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void chooseImage(event, "last")} />
+                    <label className="image-dropzone" htmlFor="last-frame-upload" {...imageDropHandlers((files) => void chooseImage(files[0], "last"))}>
+                      <input id="last-frame-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { void chooseImage(event.target.files?.[0] ?? null, "last"); event.target.value = ""; }} />
                       {lastImagePreview ? (
                         <>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -995,13 +1070,14 @@ export default function Home() {
                             hasCrop={Boolean(lastImageCrop)}
                             onCrop={() => setCropTarget({ kind: "last" })}
                             onRestore={() => void restoreOriginalImage({ kind: "last" })}
+                            onRemove={() => void chooseImage(null, "last")}
                           />
                         </>
                       ) : (
                         <>
                           <span className="upload-icon">＋</span>
                           <strong>選擇尾幀圖片</strong>
-                          <small>選填 · 控制影片結尾畫面</small>
+                          <small>可點選或拖入圖片 · 控制影片結尾畫面</small>
                         </>
                       )}
                     </label>
@@ -1021,12 +1097,12 @@ export default function Home() {
                   <div className="reference-list">
                     {referenceImages.map((reference, index) => (
                       <article className="reference-card" key={reference.id}>
-                        <label className="reference-image" htmlFor={`reference-image-${reference.id}`}>
+                        <label className="reference-image" htmlFor={`reference-image-${reference.id}`} {...imageDropHandlers((files) => void chooseReferenceImage(files[0], reference.id))}>
                           <input
                             id={`reference-image-${reference.id}`}
                             type="file"
                             accept="image/png,image/jpeg,image/webp"
-                            onChange={(event) => void chooseReferenceImage(event, reference.id)}
+                            onChange={(event) => { void chooseReferenceImage(event.target.files?.[0] ?? null, reference.id); event.target.value = ""; }}
                           />
                           {reference.preview ? (
                             <>
@@ -1040,7 +1116,7 @@ export default function Home() {
                               />
                             </>
                           ) : (
-                            <><span className="upload-icon">＋</span><strong>選擇參考圖 {index + 1}</strong></>
+                            <><span className="upload-icon">＋</span><strong>選擇參考圖 {index + 1}</strong><small>可點選或拖入圖片</small></>
                           )}
                         </label>
                         <div className="reference-fields">
@@ -1104,7 +1180,7 @@ export default function Home() {
                         key={engine}
                         className={promptEngine === engine ? "active" : ""}
                         onClick={() => choosePromptEngine(engine)}
-                        disabled={isGenerating || isOptimizing}
+                        disabled={isOptimizing}
                       >
                         {engine === "grok" ? "Grok" : "Codex"}
                       </button>
@@ -1113,12 +1189,12 @@ export default function Home() {
                   <button
                     className="prompt-optimize-button"
                     onClick={optimizePrompt}
-                    disabled={!connected || isGenerating || isOptimizing || Boolean(continuationSource)}
+                    disabled={!connected || isOptimizing || Boolean(continuationSource)}
                   >
                     <span>✦</span>{isOptimizing ? `${engineLabel} 正在依官方 Skill 優化…` : "官方 H3 Prompt 優化"}
                   </button>
                   {promptBeforeOptimization !== null && (
-                    <button className="prompt-restore-button" onClick={restorePrompt} disabled={isGenerating || isOptimizing}>還原原始描述</button>
+                    <button className="prompt-restore-button" onClick={restorePrompt} disabled={isOptimizing}>還原原始描述</button>
                   )}
                 </div>
                 <small>
@@ -1127,7 +1203,7 @@ export default function Home() {
                     : optimizedPromptMode
                     ? `已套用 MiniMax 官方 ${optimizedPromptMode} 格式；請確認內容後再生成。`
                     : sourceMode === "reference"
-                      ? `${engineLabel} 會分析全部參考圖，將 @標籤整理為 Ref2VA 的 Subject／Picture 對應。`
+                      ? `${engineLabel} 會分別分析選填首尾圖與其他參考圖；@標籤只對應其他參考圖的 Subject／Picture。`
                       : `透過背景 ${engineLabel} CLI 套用 MiniMax 官方 Prompt Skill；圖片模式會分析首尾幀。`}
                 </small>
               </div>
@@ -1289,12 +1365,12 @@ export default function Home() {
 
                 <div className="generate-actions">
                   {sourceMode !== "image" && (
-                    <button className="generate-button image" onClick={generateImage} disabled={!connected || isGenerating || isOptimizing}>
+                    <button className="generate-button image" onClick={generateImage} disabled={!connected || isGenerating || isOptimizing || enhancementBusy}>
                       <span>✦</span>{isGenerating ? "生成中" : "生成圖片"}
                     </button>
                   )}
-                  <button className="generate-button" onClick={generate} disabled={!connected || isGenerating || isOptimizing}>
-                    <span>✦</span>{isGenerating ? "生成中" : "生成影片"}
+                  <button className="generate-button" onClick={generate} disabled={!connected || isGeneratingH3Image || isOptimizing || enhancementBusy}>
+                    <span>✦</span>{queueBusy ? "加入佇列" : "生成影片"}
                   </button>
                 </div>
               </div>
@@ -1312,7 +1388,7 @@ export default function Home() {
                 {profile === "low-vram" && <span> · Turbo LoRA 改用 merge 模式，省下採樣時最大的一筆顯存配置；長片較不易爆顯存，畫面略柔</span>}
                 {resolution !== "safe" && <span> · 較高解析度的顯存與時間需求較高</span>}
                 {extremeImageRatio && <span> · 極端圖片比例可能降低生成品質</span>}
-                {sourceMode !== "image" && <span> · 「生成圖片」忽略秒數與聲音，輸出 2K PNG（{resolveImageDimensions(aspect).join("×")}）</span>}
+                {sourceMode !== "image" && <span> · 「生成圖片」忽略秒數、聲音與首尾圖，輸出 2K PNG（{resolveImageDimensions(aspect).join("×")}）</span>}
               </div>
             </section>
 
@@ -1321,14 +1397,15 @@ export default function Home() {
             )}
             {notice && <div className="notice success" aria-live="polite">{notice}</div>}
             {error && <div className="notice error">{error}</div>}
-            {isGenerating && (
+            {isGeneratingH3Image && (
               <div className="generation-status" aria-live="polite">
                 <div className="status-copy"><strong>{statusText}</strong><span>已經過 {elapsed} 秒，請勿關閉 ComfyUI。</span></div>
                 <div className="progress-track"><span /></div>
               </div>
             )}
 
-            <RecentSection videos={videoWorks.slice(0, 3)} onViewAll={() => setView("works")} onDelete={removeVideo} onExtend={extendVideo} onRedo={redoVideo} onReuseSeed={reuseSeed} emptyText="第一支影片，從一句話開始" />
+            </>}
+            {!enhancementBusy && <RecentSection videos={videoWorks.slice(0, 3)} onViewAll={() => setView("works")} onDelete={removeVideo} onExtend={extendVideo} onRedo={redoVideo} onReuseSeed={reuseSeed} emptyText="第一支影片，從一句話開始" />}
           </>
         ) : view === "edit" ? (
           <>
@@ -1340,7 +1417,7 @@ export default function Home() {
 
             <section className="composer" aria-label="圖像編輯設定">
               <div className="qwen-upload-section">
-                <p>不加圖片就是文字生圖；加了圖片後輸出會依第一張的比例，描述裡打 @ 就能挑要指定哪一張（插入 &lt;image1&gt;、&lt;image2&gt;）。</p>
+                <p>{qwenCameraEnabled ? "上傳一張原圖後，透過下方的攝影機視角選項生成新的觀看角度。" : "不加圖片就是文字生圖；加了圖片後輸出會依第一張的比例，描述裡打 @ 就能挑要指定哪一張（插入 <image1>、<image2>）。"}</p>
                 <div className="qwen-image-grid">
                   {qwenImages.map((image, index) => (
                     <div className="qwen-image-slot" key={image.id}>
@@ -1349,7 +1426,9 @@ export default function Home() {
                       <span>&lt;image{index + 1}&gt;</span>
                       <CropActions
                         hasCrop={Boolean(image.crop)}
+                        hasEdits={image.file !== image.originalFile}
                         disabled={isOptimizing}
+                        onMark={() => setMarkerId(image.id)}
                         onCrop={() => setCropTarget({ kind: "qwen", id: image.id })}
                         onRestore={() => void restoreOriginalImage({ kind: "qwen", id: image.id })}
                       />
@@ -1357,17 +1436,57 @@ export default function Home() {
                     </div>
                   ))}
                   {qwenImages.length < QWEN_MAX_IMAGES && (
-                    <label className="image-dropzone qwen-image-slot" htmlFor="qwen-image-upload">
-                      <input id="qwen-image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={chooseQwenImages} disabled={isOptimizing} />
+                    <label className="image-dropzone qwen-image-slot" htmlFor="qwen-image-upload" {...imageDropHandlers(chooseQwenImages, isOptimizing)}>
+                      <input id="qwen-image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => { chooseQwenImages(Array.from(event.target.files ?? [])); event.target.value = ""; }} disabled={isOptimizing} />
                       <span className="upload-icon">＋</span>
                       <strong>加入圖片</strong>
-                      <small>選填 · 最多 {QWEN_MAX_IMAGES} 張</small>
+                      <small>可點選或拖入圖片 · 最多 {QWEN_MAX_IMAGES} 張</small>
                     </label>
                   )}
                 </div>
               </div>
 
-              <div className="prompt-editor">
+              <div className="qwen-camera-panel">
+                <label className="qwen-camera-toggle">
+                  <input type="checkbox" checked={qwenCameraEnabled} onChange={(event) => { setQwenCameraEnabled(event.target.checked); setQwenMention(null); }} disabled={isOptimizing} />
+                  <span>攝影機視角</span>
+                  <small>自動套用視角 LoRA v2</small>
+                </label>
+                {qwenCameraEnabled && (
+                  <>
+                    <div className="qwen-camera-controls">
+                      <label>
+                        <span>水平方位</span>
+                        <select aria-label="攝影機水平方位" value={qwenCamera.azimuth} onChange={(event) => setQwenCamera({ ...qwenCamera, azimuth: Number(event.target.value) as QwenCamera["azimuth"] })} disabled={isOptimizing}>
+                          {QWEN_CAMERA_AZIMUTHS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        <span>拍攝角度</span>
+                        <select aria-label="攝影機拍攝角度" value={qwenCamera.elevation} onChange={(event) => setQwenCamera({ ...qwenCamera, elevation: Number(event.target.value) as QwenCamera["elevation"] })} disabled={isOptimizing}>
+                          {QWEN_CAMERA_ELEVATIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        <span>景別</span>
+                        <select aria-label="攝影機景別" value={qwenCamera.framing} onChange={(event) => setQwenCamera({ ...qwenCamera, framing: event.target.value as QwenCamera["framing"] })} disabled={isOptimizing}>
+                          <option value="standard">一般</option>
+                          <option value="close-up">近景</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>LoRA 強度 · {(qwenCamera.strength ?? 1).toFixed(2)}</span>
+                        <input type="range" aria-label="攝影機 LoRA 強度" min={0} max={1} step={0.05} value={qwenCamera.strength ?? 1} onChange={(event) => setQwenCamera({ ...qwenCamera, strength: Number(event.target.value) })} disabled={isOptimizing} />
+                      </label>
+                    </div>
+                    <p>請上傳一張原圖，選好視角即可生成，無須填寫提示詞。方位以主體正面為基準，角度為模型的訓練視角，效果可能有偏差。</p>
+                    <p>已自動加入保留原場景、背景與光線的要求。強度建議先用 0.80；降低可能減少場景變化，也可能讓轉向變弱，仍無法保證背景完整保留。</p>
+                    {qwenImages.length !== 1 && <p role="status">{qwenImages.length === 0 ? "請先加入一張原圖。" : "目前有多張圖片，請保留一張原圖。"}</p>}
+                  </>
+                )}
+              </div>
+
+              <div className="prompt-editor" hidden={qwenCameraEnabled}>
                 <textarea
                   ref={qwenPromptRef}
                   value={qwenPrompt}
@@ -1413,12 +1532,12 @@ export default function Home() {
                     <button
                       className="prompt-optimize-button"
                       onClick={optimizeQwenPrompt}
-                      disabled={!connected || isGenerating || isOptimizing}
+                      disabled={!connected || isOptimizing}
                     >
                       <span>✦</span>{isOptimizing ? "Codex 正在優化…" : "優化提示詞"}
                     </button>
                     {qwenPromptBeforeOptimization !== null && (
-                      <button className="prompt-restore-button" onClick={restoreQwenPrompt} disabled={isGenerating || isOptimizing}>還原原文</button>
+                      <button className="prompt-restore-button" onClick={restoreQwenPrompt} disabled={isOptimizing}>還原原文</button>
                     )}
                   </div>
                   <small>
@@ -1510,8 +1629,8 @@ export default function Home() {
                 </div>
 
                 <div className="generate-actions">
-                  <button className="generate-button" onClick={generateQwenImage} disabled={!connected || isGenerating || isOptimizing}>
-                    <span>✦</span>{isGenerating ? "生成中" : qwenImages.length ? "編輯圖像" : "生成圖像"}
+                  <button className="generate-button" onClick={generateQwenImage} disabled={!connected || isGeneratingH3Image || enhancementBusy || isOptimizing || (qwenCameraEnabled && qwenImages.length !== 1)}>
+                    <span>✦</span>{queueBusy ? "加入佇列" : qwenCameraEnabled ? "生成新視角" : qwenImages.length ? "編輯圖像" : "生成圖像"}
                   </button>
                 </div>
               </div>
@@ -1534,7 +1653,7 @@ export default function Home() {
             )}
             {notice && <div className="notice success" aria-live="polite">{notice}</div>}
             {error && <div className="notice error">{error}</div>}
-            {isGenerating && (
+            {isGeneratingH3Image && (
               <div className="generation-status" aria-live="polite">
                 <div className="status-copy"><strong>{statusText}</strong><span>已經過 {elapsed} 秒，請勿關閉 ComfyUI。</span></div>
                 <div className="progress-track"><span /></div>
@@ -1572,6 +1691,23 @@ export default function Home() {
         }} />}
       </section>
 
+      {markerImage && (
+        <ImageMarker
+          key={markerImage.id}
+          file={markerImage.file}
+          onCancel={() => setMarkerId(null)}
+          onApply={(file) => {
+            const preview = URL.createObjectURL(file);
+            setQwenImages((images) => images.map((image) => {
+              if (image.id !== markerId) return image;
+              URL.revokeObjectURL(image.preview);
+              return { ...image, file, cropSourceFile: file, crop: null, preview };
+            }));
+            setQwenPromptBeforeOptimization(null);
+            setMarkerId(null);
+          }}
+        />
+      )}
       {cropTarget && cropFile && (
         <ImageCropper
           file={cropFile}
@@ -1592,7 +1728,7 @@ export default function Home() {
   );
 }
 
-function CropActions({ hasCrop, onCrop, onRestore, disabled = false }: { hasCrop: boolean; onCrop: () => void; onRestore: () => void; disabled?: boolean }) {
+function CropActions({ hasCrop, hasEdits = hasCrop, onCrop, onMark, onRemove, onRestore, disabled = false }: { hasCrop: boolean; hasEdits?: boolean; onCrop: () => void; onMark?: () => void; onRemove?: () => void; onRestore: () => void; disabled?: boolean }) {
   // The thumbnail is a <label> for the file input, so a plain click here would
   // also reopen the file picker.
   function intercept(action: () => void) {
@@ -1606,7 +1742,9 @@ function CropActions({ hasCrop, onCrop, onRestore, disabled = false }: { hasCrop
   return (
     <span className="crop-actions">
       <button type="button" onClick={intercept(onCrop)} disabled={disabled}>{hasCrop ? "重新裁切" : "裁切"}</button>
-      {hasCrop && <button type="button" onClick={intercept(onRestore)} disabled={disabled}>還原原圖</button>}
+      {onMark && <button type="button" onClick={intercept(onMark)} disabled={disabled}>畫記號</button>}
+      {hasEdits && <button type="button" onClick={intercept(onRestore)} disabled={disabled}>還原原圖</button>}
+      {onRemove && <button type="button" onClick={intercept(onRemove)} disabled={disabled}>移除圖片</button>}
     </span>
   );
 }
@@ -1744,6 +1882,7 @@ function VideoGrid({ videos, onDelete, onExtend, onRedo, onReuseSeed, emptyText 
             <div>
               <div className="video-meta">
                 <span title={video.filename}>{video.filename}</span>
+                {video.enhanced && <small title={`來源：${video.enhancementSource}`}>畫質提升 · 720p · {video.enhancementStrength}%</small>}
                 {video.generationSeconds !== undefined && <small>耗時 {video.generationSeconds} 秒</small>}
                 {video.extraLoras?.length ? (
                   <small title={video.extraLoras.map((l) => `${l.name} @${l.strength}`).join(", ")}>

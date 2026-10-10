@@ -31,6 +31,9 @@ export type GenerationOptions = {
 };
 
 export type GeneratedVideo = {
+  enhanced?: boolean;
+  enhancementStrength?: number;
+  enhancementSource?: string;
   filename: string;
   subfolder: string;
   type: string;
@@ -43,6 +46,7 @@ export type GeneratedVideo = {
   qwenSize?: QwenSize;
   /** Qwen image sampled with EasyCache skipping near-duplicate steps. */
   qwenFast?: boolean;
+  qwenCamera?: QwenCamera;
   cooldownSeconds?: number;
   generationSeconds?: number;
   seed?: number;
@@ -73,8 +77,8 @@ export type ExtraLora = { name: string; strength: number };
 
 export const TURBO_LORA = "minimax_h3_turbo_v4_step600_ema.safetensors";
 
-/** Minimum and default per-step cooldown. 12 s was measured to still overheat this machine. */
-export const MIN_COOLDOWN_SECONDS = 15;
+export const MIN_COOLDOWN_SECONDS = 5;
+export const DEFAULT_COOLDOWN_SECONDS = 15;
 
 export type PromptEngine = "codex" | "grok";
 
@@ -128,6 +132,48 @@ const IMAGE_DIMENSIONS = {
 export type QwenAspect = "1:1" | "16:9" | "9:16" | "3:2" | "2:3" | "4:3" | "3:4";
 export type QwenSize = "1mp" | "2k";
 
+export const QWEN_CAMERA_LORA = "qwen_image_2.1_multiple_angles_v2_step1500.safetensors";
+export const QWEN_CAMERA_AZIMUTHS = [
+  { value: 0, label: "正面 · 0°", prompt: "front view" },
+  { value: 30, label: "右前方 · 30°", prompt: "front-right view" },
+  { value: 60, label: "右前側 · 60°", prompt: "front-right quarter view" },
+  { value: 90, label: "右側 · 90°", prompt: "right side view" },
+  { value: 120, label: "右後側 · 120°", prompt: "back-right quarter view" },
+  { value: 150, label: "右後方 · 150°", prompt: "back-right view" },
+  { value: 180, label: "背面 · 180°", prompt: "back view" },
+  { value: 210, label: "左後方 · 210°", prompt: "back-left view" },
+  { value: 240, label: "左後側 · 240°", prompt: "back-left quarter view" },
+  { value: 270, label: "左側 · 270°", prompt: "left side view" },
+  { value: 300, label: "左前側 · 300°", prompt: "front-left quarter view" },
+  { value: 330, label: "左前方 · 330°", prompt: "front-left view" },
+] as const;
+export const QWEN_CAMERA_ELEVATIONS = [
+  { value: 0, label: "平視 · 0°", prompt: "eye-level shot" },
+  { value: 30, label: "抬高俯拍 · 30°", prompt: "elevated shot" },
+  { value: 60, label: "高角度俯拍 · 60°", prompt: "high-angle shot" },
+  { value: 90, label: "正上方 · 90°", prompt: "top-down shot" },
+] as const;
+export type QwenCamera = {
+  azimuth: typeof QWEN_CAMERA_AZIMUTHS[number]["value"];
+  elevation: typeof QWEN_CAMERA_ELEVATIONS[number]["value"];
+  framing: "standard" | "close-up";
+  /** Older works used a fixed strength of 1. */
+  strength?: number;
+};
+export const QWEN_DEFAULT_CAMERA: QwenCamera = { azimuth: 30, elevation: 0, framing: "standard", strength: 0.8 };
+
+export function buildQwenCameraPrompt(camera: QwenCamera): string {
+  const azimuth = QWEN_CAMERA_AZIMUTHS.find((item) => item.value === camera.azimuth);
+  const elevation = QWEN_CAMERA_ELEVATIONS.find((item) => item.value === camera.elevation);
+  const strength = camera.strength ?? 1;
+  if (!azimuth || !elevation || !["standard", "close-up"].includes(camera.framing)
+      || !Number.isFinite(strength) || strength < 0 || strength > 1) {
+    throw new Error("攝影機視角設定無效，請重新選擇方位、拍攝角度與景別。");
+  }
+  return `<mva> ${azimuth.prompt}, ${elevation.prompt}${camera.framing === "close-up" ? " close-up" : ""}\n`
+    + "Rephotograph the complete scene in <image1> from the requested viewpoint. Preserve the original environment, background objects, room layout, materials, lighting, and visual style, with perspective adjusted to the new camera position. Keep the subject's identity, clothing, and pose unchanged. Keep the subject in the original scene with its surrounding environment visible. Do not isolate the subject or replace the environment with a plain, grey, white, studio, or transparent background.";
+}
+
 export type QwenImageOptions = {
   prompt: string;
   aspect: QwenAspect;
@@ -140,6 +186,7 @@ export type QwenImageOptions = {
   count?: number;
   /** EasyCache: reuse the previous step's output when the model barely changes it; faster, slightly softer. */
   fast?: boolean;
+  camera?: QwenCamera;
 };
 
 /** Qwen cooling can be disabled with 0 seconds. */
@@ -237,7 +284,7 @@ export function buildWorkflow(options: GenerationOptions, uploadedFirstImage?: s
   const chainId = options.chainId ?? "preview";
   const clipIndex = options.clipIndex ?? 1;
   const latentPath = options.latentPath ?? `h3_context/${chainId}`;
-  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? MIN_COOLDOWN_SECONDS);
+  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS);
   const graph: PromptGraph = {
     "6": node("UNETLoader", { unet_name: "minimax_h3_fl2va_pruned_int8_convrot.safetensors", weight_dtype: "default" }, "H3 模型"),
     "9": node("BasicScheduler", { model: ["6", 0], scheduler: "simple", steps: quality ? 20 : cooledTurbo8 ? 8 : cooledTurbo4 ? 4 : 6, denoise: 1 }, "採樣排程"),
@@ -326,13 +373,13 @@ export function buildReferencePrompt(prompt: string, references: ReferenceDefini
   return `subject_definitions:\n${definitions.join("\n")}\n\ndetailed_description:\n${detailedDescription}`;
 }
 
-export function buildReferenceWorkflow(options: GenerationOptions, uploadedReferenceImages: string[], continuationFrame?: string): PromptGraph {
+export function buildReferenceWorkflow(options: GenerationOptions, uploadedReferenceImages: string[], continuationFrame?: string, firstFrame?: string, lastFrame?: string): PromptGraph {
   if (continuationFrame && uploadedReferenceImages.length > 8) {
     throw new Error("Ref2VA 延伸最多可沿用 8 張參考圖。 ");
   }
   const [width, height] = resolveGenerationDimensions(options);
   const continuation = Boolean(continuationFrame);
-  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? MIN_COOLDOWN_SECONDS);
+  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS);
   const graph: PromptGraph = {
     "6": node("UNETLoader", { unet_name: "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors", weight_dtype: "default" }, "H3 Ref2VA W4A8 模型"),
     "9": node("BasicScheduler", { model: ["6", 0], scheduler: "simple", steps: options.profile === "cooled-turbo-4" ? 4 : 8, denoise: 1 }, options.profile === "cooled-turbo-4" ? "Turbo 4 步排程" : "Turbo 8 步排程"),
@@ -357,7 +404,7 @@ export function buildReferenceWorkflow(options: GenerationOptions, uploadedRefer
     "119": node("MiniMaxH3MemoryEfficientSageAttentionPatch", { model: ["120", 0] }, "SageAttention 省顯存"),
     "120": node("MiniMaxH3TurboLoRA", { model: ["6", 0], lora_name: TURBO_LORA, strength: 1, low_vram: options.profile === "low-vram" }, "H3 Turbo LoRA"),
     "121": node("MiniMaxH3TurboSampler", {}, "H3 Turbo 採樣器"),
-    "122": node("H3CooledTurboSampler", { sampler: ["121", 0], seconds: cooldown }, "每步休息 15 秒"),
+    "122": node("H3CooledTurboSampler", { sampler: ["121", 0], seconds: cooldown }, `每步休息 ${cooldown} 秒`),
     "150": node("MiniMaxH3LatentLabLongMediaSampler", {
       initial_av: ["104", 1], long_media_plan: ["104", 2], guider: ["16", 0], sampler: ["122", 0],
       sigmas: ["9", 0], seed: options.seed ?? randomSeed(),
@@ -388,6 +435,20 @@ export function buildReferenceWorkflow(options: GenerationOptions, uploadedRefer
     graph[nodeId] = node("LoadImage", { image }, `參考圖片 ${index + 1}`);
     graph["104"].inputs[`image_${index + (continuation ? 2 : 1)}`] = [nodeId, 0];
   });
+  if (!continuation) {
+    let conditioning: [string, number] = ["104", 0];
+    for (const [index, image] of [firstFrame, lastFrame].entries()) {
+      if (!image) continue;
+      const loadId = String(210 + index);
+      const guideId = String(212 + index);
+      graph[loadId] = node("LoadImage", { image }, index === 0 ? "首幀圖片" : "尾幀圖片");
+      graph[guideId] = node("MiniMaxH3AddGuide", {
+        positive: conditioning, latent: ["104", 1], vae: ["11", 0], image: [loadId, 0], frame_idx: index === 0 ? 0 : -1,
+      }, index === 0 ? "約束影片首幀" : "約束影片尾幀");
+      conditioning = [guideId, 0];
+    }
+    graph["16"].inputs.conditioning = conditioning;
+  }
   return graph;
 }
 
@@ -401,7 +462,7 @@ export function buildReferenceWorkflow(options: GenerationOptions, uploadedRefer
 export function buildImageWorkflow(options: GenerationOptions, uploadedReferenceImages: string[] = []): PromptGraph {
   const [width, height] = resolveImageDimensions(options.aspect);
   const reference = options.inputMode === "reference";
-  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? MIN_COOLDOWN_SECONDS);
+  const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS);
   const graph: PromptGraph = {
     "6": node("UNETLoader", {
       unet_name: reference ? "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors" : "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -420,7 +481,7 @@ export function buildImageWorkflow(options: GenerationOptions, uploadedReference
     "119": node("MiniMaxH3MemoryEfficientSageAttentionPatch", { model: ["120", 0] }, "SageAttention 省顯存"),
     "120": node("MiniMaxH3TurboLoRA", { model: ["6", 0], lora_name: TURBO_LORA, strength: 1, low_vram: false }, "H3 Turbo LoRA"),
     "121": node("MiniMaxH3TurboSampler", {}, "H3 Turbo 採樣器"),
-    "122": node("H3CooledTurboSampler", { sampler: ["121", 0], seconds: cooldown }, "每步休息 15 秒"),
+    "122": node("H3CooledTurboSampler", { sampler: ["121", 0], seconds: cooldown }, `每步休息 ${cooldown} 秒`),
     "200": node("ImageFromBatch", { image: ["10", 0], batch_index: 2, length: 1 }, "取中間一幀"),
     "201": node("SaveImage", { images: ["200", 0], filename_prefix: "H3_Image/H3_Studio_IMG" }, "儲存 PNG"),
   };
@@ -451,17 +512,20 @@ export function buildImageWorkflow(options: GenerationOptions, uploadedReference
 export function buildQwenImageWorkflow(options: QwenImageOptions, uploadedImages: string[] = []): PromptGraph {
   const [width, height] = QWEN_DIMENSIONS[options.size][options.aspect];
   const editing = uploadedImages.length > 0;
+  if (options.camera && uploadedImages.length !== 1) throw new Error("攝影機視角需要且只接受一張原圖。");
+  const prompt = options.camera ? buildQwenCameraPrompt(options.camera) : options.prompt;
+  const model = options.camera ? ["14", 0] : ["1", 0];
   const cooldown = Math.max(QWEN_MIN_COOLDOWN_SECONDS, options.cooldownSeconds);
   const graph: PromptGraph = {
     "1": node("UNETLoader", { unet_name: "qwen_image_2.1_int8_convrot.safetensors", weight_dtype: "default" }, "Qwen-Image 2.1"),
     "2": node("CLIPLoader", { clip_name: "qwen3vl_8b_int8_convrot.safetensors", type: "qwen_image", device: "default" }, "Qwen3-VL 文字編碼器"),
     "3": node("VAELoader", { vae_name: "qwen_image_2.1_vae_bf16.safetensors" }, "Qwen VAE"),
     "4": node("TextEncodeQwenImage21", {
-      clip: ["2", 0], prompt: options.prompt, negative_prompt: "", resolution: options.size === "2k" ? 2048 : 1024, ...(editing ? { vae: ["3", 0] } : {}),
+      clip: ["2", 0], prompt, negative_prompt: "", resolution: options.size === "2k" ? 2048 : 1024, ...(editing ? { vae: ["3", 0] } : {}),
     }, "編碼提示與參考圖"),
     "6": node("KSamplerSelect", { sampler_name: "euler" }, "Euler"),
     "7": node("H3CooledSampler", { sampler: ["6", 0], seconds: cooldown, skip_last: true }, `每步休息 ${cooldown} 秒`),
-    "8": node("BasicScheduler", { model: ["1", 0], scheduler: "simple", steps: options.steps, denoise: 1 }, "排程"),
+    "8": node("BasicScheduler", { model, scheduler: "simple", steps: options.steps, denoise: 1 }, "排程"),
     "9": node("SamplerCustom", {
       model: options.fast ? ["13", 0] : editing ? ["12", 0] : ["1", 0], add_noise: true, noise_seed: options.seed ?? randomSeed(), cfg: 1,
       positive: ["4", 0], negative: ["4", 1], sampler: ["7", 0], sigmas: ["8", 0], latent_image: editing ? ["4", 2] : ["5", 0],
@@ -469,8 +533,11 @@ export function buildQwenImageWorkflow(options: QwenImageOptions, uploadedImages
     "10": node("VAEDecode", { samples: ["9", 0], vae: ["3", 0] }, "解碼影像"),
     "11": node("SaveImage", { images: ["10", 0], filename_prefix: "H3_Image/H3_Studio_QWEN" }, "儲存 PNG"),
   };
+  if (options.camera) {
+    graph["14"] = node("LoraLoaderModelOnly", { model: ["1", 0], lora_name: QWEN_CAMERA_LORA, strength_model: options.camera.strength ?? 1 }, "攝影機視角 LoRA v2");
+  }
   if (editing) {
-    graph["12"] = node("QwenImage21Cache", { model: ["1", 0], device: "auto", dtype: "default" }, "KV 快取");
+    graph["12"] = node("QwenImage21Cache", { model, device: "auto", dtype: "default" }, "KV 快取");
     uploadedImages.forEach((image, index) => {
       const nodeId = String(300 + index);
       graph[nodeId] = node("LoadImage", { image }, `參考圖 ${index + 1}`);
@@ -487,7 +554,7 @@ export function buildQwenImageWorkflow(options: QwenImageOptions, uploadedImages
   return graph;
 }
 
-async function request(path: string, init?: RequestInit) {
+export async function request(path: string, init?: RequestInit) {
   const response = await fetch(`${COMFY_URL}${path}`, init);
   if (!response.ok) {
     let details = "";
@@ -586,6 +653,9 @@ function referenceMetadataFromHistory(entry: { prompt?: unknown }) {
   }
   if (!referenceFiles.length) return {};
   const prompt = typeof setup.inputs.prompt === "string" ? setup.inputs.prompt : "";
+  const guides = Object.values(graph).filter((item) => item.class_type === "MiniMaxH3AddGuide");
+  const firstGuide = guides.find((item) => item.inputs.frame_idx === 0);
+  const lastGuide = guides.find((item) => item.inputs.frame_idx === -1);
   return {
     sourceMode: "reference" as const,
     inputMode: "reference" as const,
@@ -594,6 +664,8 @@ function referenceMetadataFromHistory(entry: { prompt?: unknown }) {
     aspect: inferAspect(setup.inputs.width, setup.inputs.height),
     seed: seedFromGraph(graph, "MiniMaxH3LatentLabLongMediaSampler", "seed"),
     extraLoras: extraLorasFromGraph(graph),
+    firstImagePath: firstGuide ? linkedInputImage(graph, firstGuide, "image") : undefined,
+    lastImagePath: lastGuide ? linkedInputImage(graph, lastGuide, "image") : undefined,
     referenceFiles,
     referenceDefinitions: referenceDefinitionsFromPrompt(prompt, referenceFiles.length),
     extendable: referenceFiles.length <= 8,
@@ -613,7 +685,7 @@ function seedFromGraph(graph: PromptGraph, classType: string, input: string) {
   return typeof value === "number" ? value : undefined;
 }
 
-function linkedInputImage(graph: PromptGraph, setup: GraphNode, input: "first_frame" | "last_frame") {
+function linkedInputImage(graph: PromptGraph, setup: GraphNode, input: "first_frame" | "last_frame" | "image") {
   const link = setup.inputs[input];
   if (!Array.isArray(link) || typeof link[0] !== "string") return undefined;
   const loadImage = graph[link[0]];
@@ -713,8 +785,8 @@ export async function getRecentVideos() {
   return files.outputs.map((file) => ({ ...file, ...historyByPath.get(`${file.subfolder}/${file.filename}`) }));
 }
 
-async function waitForResult(promptId: string, onStatus: (status: string) => void, kind: "video" | "image" = "video") {
-  let announcedRun = false;
+export async function waitForResult(promptId: string, onStatus: (status: string) => void, kind: "video" | "image" = "video") {
+  let lastStatus = "";
   for (;;) {
     const response = await request(`/history/${encodeURIComponent(promptId)}`);
     const history = (await response.json()) as Record<string, unknown>;
@@ -725,9 +797,14 @@ async function waitForResult(promptId: string, onStatus: (status: string) => voi
       if (results.length) return results[0];
       if (entry.status?.completed) throw new Error(kind === "image" ? "工作流已完成，但找不到輸出的圖片檔。 " : "工作流已完成，但找不到輸出的影片檔。 ");
     }
-    if (!announcedRun) {
-      onStatus(kind === "image" ? "H3 正在載入模型並生成圖片…" : "H3 正在載入模型並生成影片…");
-      announcedRun = true;
+    const queueResponse = await request("/queue");
+    const queue = await queueResponse.json() as { queue_running: [number, string][] };
+    const status = queue.queue_running.some((item) => item[1] === promptId)
+      ? "GPU 正在載入模型並生成…"
+      : "工作已進入佇列，等待 GPU 執行…";
+    if (status !== lastStatus) {
+      onStatus(status);
+      lastStatus = status;
     }
     await new Promise((resolve) => window.setTimeout(resolve, 1500));
   }
@@ -791,7 +868,7 @@ export async function createVideo(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: runOptions.inputMode === "reference"
-        ? buildReferenceWorkflow(runOptions, uploadedReferenceImages, continuationFrame)
+        ? buildReferenceWorkflow(runOptions, uploadedReferenceImages, continuationFrame, uploadedFirstImage, uploadedLastImage)
         : buildWorkflow(runOptions, uploadedFirstImage, uploadedLastImage),
       client_id: clientId,
     }),
@@ -816,7 +893,7 @@ export async function createVideo(
   const metadata = {
     seed: runOptions.seed,
     extraLoras: runOptions.extraLoras,
-    cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, runOptions.cooldownSeconds ?? MIN_COOLDOWN_SECONDS),
+    cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, runOptions.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS),
     generationSeconds: segment.generationSeconds ?? Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
     chainId,
     clipIndex,
@@ -831,8 +908,8 @@ export async function createVideo(
     aspect: runOptions.aspect,
     sourceMode: runOptions.sourceMode ?? (runOptions.inputMode === "reference" ? "reference" : uploadedFirstImage || uploadedLastImage ? "image" : "text"),
     inputMode: runOptions.inputMode ?? "standard",
-    firstImagePath: runOptions.inputMode !== "reference" ? uploadedFirstImage : undefined,
-    lastImagePath: runOptions.inputMode !== "reference" ? uploadedLastImage : undefined,
+    firstImagePath: uploadedFirstImage,
+    lastImagePath: uploadedLastImage,
     referenceFiles: runOptions.inputMode === "reference" ? uploadedReferenceImages : undefined,
     referenceDefinitions: runOptions.inputMode === "reference"
       ? (referenceContinuation ? source.referenceDefinitions : referenceImages.map(({ label, description }) => ({ label, description })))
@@ -903,7 +980,7 @@ export async function createImage(
     kind: "image",
     seed,
     extraLoras: runOptions.extraLoras,
-    cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, runOptions.cooldownSeconds ?? MIN_COOLDOWN_SECONDS),
+    cooldownSeconds: Math.max(MIN_COOLDOWN_SECONDS, runOptions.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS),
     generationSeconds: segment.generationSeconds ?? Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
     profile: "cooled-turbo-8",
     resolution: runOptions.resolution,
@@ -943,6 +1020,14 @@ export async function createQwenImage(
   onStatus: (status: string) => void,
   onImage?: (image: GeneratedVideo) => void,
 ) {
+  if (options.camera) {
+    if (images.length !== 1) throw new Error("攝影機視角需要且只接受一張原圖。");
+    buildQwenCameraPrompt(options.camera);
+    onStatus("正在確認攝影機視角模型…");
+    const info = await (await request("/object_info/LoraLoaderModelOnly")).json();
+    const names: string[] = info.LoraLoaderModelOnly?.input?.required?.lora_name?.[0] ?? [];
+    if (!names.includes(QWEN_CAMERA_LORA)) throw new Error(`尚未安裝攝影機視角 LoRA：${QWEN_CAMERA_LORA}。請放入 ComfyUI/models/loras 後重新整理。`);
+  }
   const count = Math.min(QWEN_MAX_COUNT, Math.max(1, options.count ?? 1));
   let uploadedImages: string[] = [];
   if (images.length) {
@@ -986,13 +1071,14 @@ async function runQwenPrompt(options: QwenImageOptions, uploadedImages: string[]
     qwenAspect: options.aspect,
     qwenSize: options.size,
     ...(options.fast ? { qwenFast: true } : {}),
+    ...(options.camera ? { qwenCamera: { ...options.camera, strength: options.camera.strength ?? 1 }, extraLoras: [{ name: QWEN_CAMERA_LORA, strength: options.camera.strength ?? 1 }] } : {}),
     seed,
     cooldownSeconds: Math.max(QWEN_MIN_COOLDOWN_SECONDS, options.cooldownSeconds),
     generationSeconds: segment.generationSeconds ?? Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
     // Edits follow the reference image, so the canvas is only known for text-to-image.
     ...(uploadedImages.length ? {} : { width, height }),
     sound: false,
-    prompt: options.prompt,
+    prompt: options.camera ? buildQwenCameraPrompt(options.camera) : options.prompt,
     referenceFiles: uploadedImages.length ? uploadedImages : undefined,
     extendable: false,
   };

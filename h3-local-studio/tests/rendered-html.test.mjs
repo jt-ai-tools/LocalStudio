@@ -2,6 +2,58 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+test("reference video keeps optional first/last anchors separate from reference ordinals", async () => {
+  const { buildReferenceWorkflow } = await import(new URL("../lib/comfy.ts", import.meta.url));
+  const options = { prompt: "A blue ball rolls across a table.", profile: "cooled-turbo-8", resolution: "safe", duration: 5, aspect: "16:9", sound: true, inputMode: "reference" };
+  for (const [first, last] of [[undefined, undefined], ["first.png", undefined], [undefined, "last.png"], ["first.png", "last.png"]]) {
+    const graph = buildReferenceWorkflow(options, ["identity.png", "scene.png"], undefined, first, last);
+    assert.equal(graph["104"].inputs.workflow_mode, "ref2va_full");
+    assert.deepEqual(graph["104"].inputs.image_1, ["200", 0]);
+    assert.deepEqual(graph["104"].inputs.image_2, ["201", 0]);
+    assert.equal(graph["200"].inputs.image, "identity.png");
+    assert.equal(graph["201"].inputs.image, "scene.png");
+    assert.deepEqual(graph["150"].inputs.initial_av, ["104", 1]);
+    let conditioning = ["104", 0];
+    for (const [index, image] of [first, last].entries()) {
+      const guide = graph[String(212 + index)];
+      if (!image) { assert.equal(guide, undefined); continue; }
+      assert.equal(guide.class_type, "MiniMaxH3AddGuide");
+      assert.equal(guide.inputs.frame_idx, index === 0 ? 0 : -1);
+      assert.deepEqual(guide.inputs.positive, conditioning);
+      assert.deepEqual(guide.inputs.latent, ["104", 1]);
+      assert.equal(graph[guide.inputs.image[0]].inputs.image, image);
+      conditioning = [String(212 + index), 0];
+    }
+    assert.deepEqual(graph["16"].inputs.conditioning, conditioning);
+  }
+  const continuation = buildReferenceWorkflow(options, ["identity.png"], "previous-end.png", "old-first.png", "old-last.png");
+  assert.equal(continuation["104"].inputs.workflow_mode, "hybrid_auto");
+  assert.deepEqual(continuation["104"].inputs.image_1, ["199", 0]);
+  assert.deepEqual(continuation["104"].inputs.image_2, ["200", 0]);
+  assert.equal(continuation["212"], undefined);
+  assert.equal(continuation["213"], undefined);
+});
+
+test("reference history recovers frame anchors independently from reference images", async () => {
+  const { buildReferenceWorkflow, getRecentVideos } = await import(new URL("../lib/comfy.ts", import.meta.url));
+  const graph = buildReferenceWorkflow({ prompt: "A blue ball rolls.", profile: "cooled-turbo-8", resolution: "safe", duration: 5, aspect: "16:9", sound: true }, ["reference.png"], undefined, "first.png", "last.png");
+  const output = { filename: "hybrid-test.mp4", subfolder: "video", type: "output" };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => Response.json(String(url).includes("/history")
+    ? { "hybrid-test": { prompt: [0, "hybrid-test", graph], outputs: { "92": { images: [output] } } } }
+    : { outputs: [output] });
+  try {
+    const [video] = await getRecentVideos();
+    assert.equal(video.sourceMode, "reference");
+    assert.equal(video.inputMode, "reference");
+    assert.equal(video.firstImagePath, "first.png");
+    assert.equal(video.lastImagePath, "last.png");
+    assert.deepEqual(video.referenceFiles, ["reference.png"]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -117,7 +169,7 @@ test("adds Ref2VA references without replacing existing generation flows", async
   assert.doesNotMatch(page, /!reference\.description\.trim\(\)/);
   assert.match(page, /新增參考/);
   assert.match(page, /referenceImages\.length >= 9/);
-  assert.match(styles, /grid-template-columns: repeat\(3,1fr\)/);
+  assert.match(styles, /grid-template-columns: repeat\(4,1fr\)/);
   assert.match(comfy, /minimax_h3_ref2va_pruned_w4a8_mixed\.safetensors/);
   assert.match(comfy, /continuation \? "hybrid_auto" : "ref2va_full"/);
   assert.match(comfy, /attention_mode: "existing"/);
@@ -247,8 +299,8 @@ test("loads saved generation settings without automatically generating", async (
   assert.match(styles, /\.menu-popover \.redo-action/);
   assert.match(styles, /\.notice\.success/);
   assert.match(comfy, /sourceMode: runOptions\.sourceMode/);
-  assert.match(comfy, /firstImagePath: runOptions\.inputMode/);
-  assert.match(comfy, /lastImagePath: runOptions\.inputMode/);
+  assert.match(comfy, /firstImagePath: uploadedFirstImage/);
+  assert.match(comfy, /lastImagePath: uploadedLastImage/);
   assert.match(comfy, /export function inputImageUrl/);
   assert.match(api, /data\.get\("duration"\)/);
   assert.match(api, /data\.get\("sourceMode"\)/);
