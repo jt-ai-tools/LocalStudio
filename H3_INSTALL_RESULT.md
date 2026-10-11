@@ -1,5 +1,7 @@
 # MiniMax H3 / ComfyUI 安裝結果
 
+> 本文件為 2026-08-11 的本機歷史實測，保留當時版本、路徑及數據。目前安裝、模型下載與新功能以 [README.md](README.md) 為準；不要用本文件取代目前安裝指南。
+
 完成日期：2026-08-11（Asia/Taipei）
 
 狀態：安裝完成；Native、Sage、Turbo 6 steps、Turbo 8 steps、INT8 VAE 均已完成實際影片 smoke test。
