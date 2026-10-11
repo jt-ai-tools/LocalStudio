@@ -38,15 +38,15 @@ button { color: inherit; }
 .online .status-dot, .local-label .status-dot { background: var(--green); box-shadow: 0 0 9px rgba(69,227,161,.9); }
 .offline .status-dot { background: #ffac52; }
 
-.sidebar { position: fixed; z-index: 10; inset: 64px auto 0 0; width: 86px; border-right: 1px solid #20212a; display: flex; flex-direction: column; justify-content: space-between; background: rgba(9,10,15,.78); padding: 18px 10px 20px; }
-.side-nav { display: grid; gap: 10px; }
-.nav-item { border: 1px solid transparent; background: transparent; border-radius: 14px; padding: 12px 4px 10px; display: grid; place-items: center; gap: 7px; color: #727481; font-size: 11px; cursor: pointer; }
+.sidebar { position: fixed; z-index: 10; inset: 64px auto 0 0; width: 120px; border-right: 1px solid #20212a; display: flex; flex-direction: column; justify-content: space-between; background: rgba(9,10,15,.78); padding: 18px 10px 20px; }
+.side-nav { display: grid; gap: 12px; }
+.nav-item { border: 1px solid transparent; background: transparent; border-radius: 14px; padding: 16px 6px 14px; display: grid; place-items: center; gap: 9px; color: #727481; font-size: 14px; cursor: pointer; }
 .nav-item:hover { color: #c8c9d2; background: #11121a; }
 .nav-item.active { color: #fff; border-color: #2b2c38; background: #151621; box-shadow: inset 2px 0 var(--purple); }
-.nav-icon { font-size: 18px; }
+.nav-icon { font-size: 24px; }
 .local-label { display: grid; place-items: center; gap: 5px; color: #777986; font-size: 8px; letter-spacing: .12em; }
 
-.content { min-height: 100vh; margin-left: 86px; padding: 112px clamp(24px,7vw,110px) 70px; }
+.content { min-height: 100vh; margin-left: 120px; padding: 112px clamp(24px,7vw,110px) 70px; }
 .hero { text-align: center; margin: 0 auto 35px; }
 .eyebrow { color: #a487ff !important; font-size: 10px !important; font-weight: 700; letter-spacing: .18em; margin: 0 0 8px; }
 .hero h1 { margin: 0; font-size: clamp(34px,4.2vw,56px); letter-spacing: .03em; background: linear-gradient(110deg,#fff 28%,#c8b8ff 72%); color: transparent; background-clip: text; }
@@ -91,7 +91,9 @@ button { color: inherit; }
 .qwen-camera-panel p { line-height: 1.7; margin: 12px 0 0; }
 .qwen-camera-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-top: 16px; }
 .qwen-camera-controls label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
-.qwen-camera-controls select { width: 100%; border: 1px solid #343641; border-radius: 8px; padding: 10px; background: #16171f; color: #e9e8ee; }
+.qwen-camera-controls select { width: 100%; height: 40px; margin-top: auto; border: 1px solid #343641; border-radius: 8px; padding: 10px; background: #16171f; color: #e9e8ee; }
+.qwen-camera-controls input[type=range] { width: 100%; height: 40px; margin: auto 0 0; }
+.qwen-camera-controls small { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .continuation-banner { position: relative; padding: 16px 130px 15px 22px; border-bottom: 1px solid #3b315d; background: rgba(118,82,255,.11); }
 .continuation-banner div { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .continuation-banner strong { color: #d8ceff; font-size: 13px; }
@@ -220,6 +222,12 @@ button { color: inherit; }
 .video-meta small { color: #a78bff; font-size: 10px; }
 .video-card a { flex: 0 0 auto; color: #a78bff; text-decoration: none; }
 .card-actions { display: flex; align-items: center; gap: 8px; }
+.image-card > div { flex-direction: column; gap: 8px; }
+.image-card .card-actions { flex-wrap: wrap; }
+.image-card .card-actions > * { white-space: nowrap; }
+.image-generation-info { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.image-generation-info > small { white-space: nowrap; }
+.image-card .seed-line { flex: 0 0 auto; white-space: nowrap; }
 .more-menu { position: relative; }
 .more-button { height: 28px; border: 0; border-radius: 7px; background: transparent; color: #9496a2; padding: 0 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
 .more-button:hover, .more-button[aria-expanded="true"] { background: #22232c; color: #fff; }
@@ -260,8 +268,10 @@ button { color: inherit; }
 @media (max-width: 640px) {
   .topbar { padding-right: 12px; }
   .connection { font-size: 0; padding: 9px; }
-  .sidebar { width: 62px; }
-  .content { margin-left: 62px; padding: 96px 14px 45px; }
+  .sidebar { width: 80px; padding-left: 8px; padding-right: 8px; }
+  .nav-item { font-size: 12px; padding: 14px 4px 12px; }
+  .nav-icon { font-size: 22px; }
+  .content { margin-left: 80px; padding: 96px 14px 45px; }
   .hero h1 { font-size: 32px; }
   .mode-tabs { border-radius: 11px; }
   .composer { border-radius: 13px; }

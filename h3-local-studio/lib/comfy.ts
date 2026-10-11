@@ -373,6 +373,10 @@ export function buildReferencePrompt(prompt: string, references: ReferenceDefini
   return `subject_definitions:\n${definitions.join("\n")}\n\ndetailed_description:\n${detailedDescription}`;
 }
 
+export function referenceVideoSteps(profile: GenerationOptions["profile"]): number {
+  return profile === "cooled-turbo-4" ? 4 : profile === "fast" || profile === "cooled-fast" ? 6 : 8;
+}
+
 export function buildReferenceWorkflow(options: GenerationOptions, uploadedReferenceImages: string[], continuationFrame?: string, firstFrame?: string, lastFrame?: string): PromptGraph {
   if (continuationFrame && uploadedReferenceImages.length > 8) {
     throw new Error("Ref2VA 延伸最多可沿用 8 張參考圖。 ");
@@ -382,7 +386,7 @@ export function buildReferenceWorkflow(options: GenerationOptions, uploadedRefer
   const cooldown = Math.max(MIN_COOLDOWN_SECONDS, options.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS);
   const graph: PromptGraph = {
     "6": node("UNETLoader", { unet_name: "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors", weight_dtype: "default" }, "H3 Ref2VA W4A8 模型"),
-    "9": node("BasicScheduler", { model: ["6", 0], scheduler: "simple", steps: options.profile === "cooled-turbo-4" ? 4 : 8, denoise: 1 }, options.profile === "cooled-turbo-4" ? "Turbo 4 步排程" : "Turbo 8 步排程"),
+    "9": node("BasicScheduler", { model: ["6", 0], scheduler: "simple", steps: referenceVideoSteps(options.profile), denoise: 1 }, `Turbo ${referenceVideoSteps(options.profile)} 步排程`),
     "10": node("MiniMaxH3LatentLabLongMediaDecode", {
       final_av: ["150", 0], long_media_plan: ["104", 2], enable_tiling: true, tile_size: 256, width: 512,
       temporal_size: 32, batch_size: 1, color_match_strength: 0,
@@ -837,7 +841,7 @@ export async function createVideo(
     chainId,
     clipIndex,
     latentPath,
-    profile: source ? (referenceContinuation ? (source.profile === "low-vram" ? "low-vram" : source.profile === "cooled-turbo-4" ? "cooled-turbo-4" : "cooled-turbo-8") : "quality") : options.profile,
+    profile: source ? (referenceContinuation ? (source.profile === "low-vram" ? "low-vram" : source.profile === "fast" || source.profile === "cooled-fast" ? "fast" : source.profile === "cooled-turbo-4" ? "cooled-turbo-4" : "cooled-turbo-8") : "quality") : options.profile,
     resolution: source?.resolution ?? options.resolution,
     sound: source?.sound ?? options.sound,
     inputMode: source?.inputMode ?? options.inputMode,

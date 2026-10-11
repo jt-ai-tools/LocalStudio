@@ -2,6 +2,53 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+test("six-step anchored reference video preserves dimensions and profile through generation, metadata and continuation", async () => {
+  const { createVideo, referenceVideoSteps, resolveOutputDimensions } = await import(new URL("../lib/comfy.ts", import.meta.url));
+  const previousFetch = globalThis.fetch;
+  const graphs = [];
+  const saved = [];
+  let combinedMetadata;
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === "/upload/image") return Response.json({ name: "reference.png" });
+    if (path === "/h3-studio/continuation-frame") return Response.json({ image: "anchor.png" });
+    if (path === "/prompt") {
+      graphs.push(JSON.parse(init.body).prompt);
+      return Response.json({ prompt_id: `ref6-${graphs.length}` });
+    }
+    if (path.startsWith("/history/")) {
+      const id = path.split("/").pop();
+      return Response.json({ [id]: { status: { completed: true }, outputs: { out: { videos: [{ filename: `${id}.mp4`, subfolder: "video", type: "output" }] } } } });
+    }
+    if (path === "/h3-studio/output-metadata") {
+      saved.push(JSON.parse(init.body));
+      return Response.json({ ok: true });
+    }
+    if (path === "/h3-studio/concat") {
+      combinedMetadata = JSON.parse(init.body).metadata;
+      return Response.json({ ...combinedMetadata, filename: "combined.mp4", subfolder: "video", type: "output" });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+  try {
+    const options = { prompt: "A person walks.", profile: "fast", resolution: "p480", duration: 5, aspect: "16:9", sound: true, seed: 77, inputMode: "reference", sourceMode: "reference", sourceWidth: 600, sourceHeight: 900 };
+    const original = await createVideo(options, new File(["image"], "first.png"), null, () => {}, [{ file: new File(["image"], "reference.png"), label: "person", description: "" }]);
+    const continued = await createVideo({ ...options, continuationSource: original }, null, null, () => {});
+    assert.equal(original.profile, "fast");
+    assert.equal(saved[0].profile, "fast");
+    assert.equal(combinedMetadata.profile, "fast");
+    assert.equal(continued.profile, "fast");
+    const dimensions = resolveOutputDimensions(options);
+    assert(dimensions[1] > dimensions[0], "portrait first frame must override the manual landscape aspect");
+    assert.deepEqual([saved[0].width, saved[0].height], dimensions);
+    assert.deepEqual([combinedMetadata.width, combinedMetadata.height], dimensions);
+    for (const graph of graphs) assert.deepEqual([graph["104"].inputs.width, graph["104"].inputs.height], dimensions);
+    assert.deepEqual(graphs.map((graph) => graph["9"].inputs.steps), [6, 6]);
+    assert.equal(graphs[1]["199"].inputs.image, "anchor.png");
+    assert.equal(referenceVideoSteps(original.profile), 6);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("reference video keeps optional first/last anchors separate from reference ordinals", async () => {
   const { buildReferenceWorkflow } = await import(new URL("../lib/comfy.ts", import.meta.url));
   const options = { prompt: "A blue ball rolls across a table.", profile: "cooled-turbo-8", resolution: "safe", duration: 5, aspect: "16:9", sound: true, inputMode: "reference" };
@@ -125,9 +172,9 @@ test("keeps Motion Context continuation wiring intact", async () => {
   assert.match(api, /"--output-schema"/);
   assert.match(api, /request\.headers\.get\("Origin"\) not in STUDIO_ORIGINS/);
   assert.match(api, /if not 1 <= duration <= 15/);
-  assert.match(page, /COOLED FAST · Turbo 6 步／分段降溫/);
+  assert.match(page, /<option value="fast">6步<\/option>/);
   assert.match(page, /第 1～6 步完成後各暫停 12 秒/);
-  assert.match(page, /COOLED TURBO 8 · Turbo 8 步／每步降溫/);
+  assert.match(page, /<option value="cooled-turbo-8">8步<\/option>/);
   assert.match(page, /第 1～8 步完成後各暫停 12 秒/);
   assert.match(page, /QUALITY · 原生 20 步／每步降溫/);
   assert.match(page, /第 1～20 步完成後各暫停 12 秒/);
@@ -187,7 +234,7 @@ test("adds Ref2VA references without replacing existing generation flows", async
   assert.match(api, /"safe", "clear", "p480", "p540", "native"/);
 });
 
-test("adds a low-VRAM profile and a 540P step between 480P and native", async () => {
+test("keeps legacy low-VRAM workflows and a 540P step between 480P and native", async () => {
   const [{ buildWorkflow, buildReferenceWorkflow, resolveOutputDimensions }, page, comfy, api] = await Promise.all([
     import(new URL("../lib/comfy.ts", import.meta.url)),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -217,8 +264,8 @@ test("adds a low-VRAM profile and a 540P step between 480P and native", async ()
   assert.equal(reference["104"].inputs.height, 544);
   assert.equal(reference["9"].inputs.steps, 8);
 
-  assert.match(page, /低顯存 · Turbo 6 步／LoRA merge/);
-  assert.match(page, /低顯存 · Turbo 8 步／LoRA merge/);
+  assert.doesNotMatch(page, /<option value="(?:low-vram|cooled-fast)">/);
+  assert.match(page, /<option value="low-vram" hidden disabled>/);
   assert.match(page, /\{sizeLabels\.p540\} · 540P/);
   assert.match(comfy, /p540: \{ "16:9": \[960, 544\].*"1:1": \[736, 736\].*"9:16": \[544, 960\] \}/);
   assert.match(comfy, /p540: 960 \* 544/);
@@ -291,7 +338,7 @@ test("loads saved generation settings without automatically generating", async (
   assert.match(page, /"再做一次"/);
   assert.match(page, /async function redoVideo/);
   assert.match(page, /setPrompt\(video\.prompt\)/);
-  assert.match(page, /setProfile\(video\.profile\)/);
+  assert.match(page, /setProfile\(video\.profile === "cooled-fast" \? "fast" : video\.profile\)/);
   assert.match(page, /setResolution\(video\.resolution\)/);
   assert.match(page, /setSoundEnabled\(video\.sound\)/);
   assert.match(page, /restoreInputImage/);

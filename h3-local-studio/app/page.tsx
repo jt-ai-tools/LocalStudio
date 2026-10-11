@@ -34,6 +34,7 @@ import {
   QWEN_CAMERA_LORA,
   QWEN_DEFAULT_CAMERA,
   ReferenceImageInput,
+  referenceVideoSteps,
   resolveImageDimensions,
   resolveOutputDimensions,
 } from "@/lib/comfy";
@@ -224,6 +225,7 @@ export default function Home() {
   }, [lastImagePreview]);
 
   const anchorImageDimensions = firstImageDimensions ?? lastImageDimensions;
+  const videoImageDimensions = sourceMode === "reference" ? firstImageDimensions : sourceMode === "image" ? anchorImageDimensions : null;
 
   const sizeLabels = useMemo(() => {
     const label = (preset: GenerationOptions["resolution"]) => {
@@ -232,21 +234,21 @@ export default function Home() {
       const [width, height] = resolveOutputDimensions({
         resolution: preset,
         aspect,
-        sourceWidth: sourceMode === "image" ? anchorImageDimensions?.width : undefined,
-        sourceHeight: sourceMode === "image" ? anchorImageDimensions?.height : undefined,
+        sourceWidth: videoImageDimensions?.width,
+        sourceHeight: videoImageDimensions?.height,
       });
       return `${width} × ${height}`;
     };
     return { safe: label("safe"), clear: label("clear"), p480: label("p480"), p540: label("p540"), native: label("native") };
-  }, [anchorImageDimensions, aspect, continuationSource, sourceMode]);
+  }, [anchorImageDimensions, aspect, continuationSource, sourceMode, videoImageDimensions]);
 
   const outputSize = sizeLabels[resolution];
   const videoWorks = useMemo(() => videos.filter((item) => item.kind !== "image" && item.kind !== "audio"), [videos]);
   const imageWorks = useMemo(() => videos.filter((item) => item.kind === "image"), [videos]);
   const audioWorks = useMemo(() => videos.filter((item) => item.kind === "audio"), [videos]);
   const qwenWorks = useMemo(() => imageWorks.filter((item) => item.model === "qwen-image-2.1"), [imageWorks]);
-  // Steps that actually run per profile, for the cooldown-time estimate. Ref2VA and image are always 8.
-  const cooldownSteps = profile === "cooled-turbo-4" ? 4 : sourceMode === "reference" ? 8 : profile === "quality" ? 20 : profile === "cooled-turbo-8" ? 8 : 6;
+  // Steps that actually run per profile, for the cooldown-time estimate.
+  const cooldownSteps = sourceMode === "reference" ? referenceVideoSteps(profile) : profile === "cooled-turbo-4" ? 4 : profile === "quality" ? 20 : profile === "cooled-turbo-8" ? 8 : 6;
   const imageAspect = anchorImageDimensions ? formatAspect(anchorImageDimensions.width, anchorImageDimensions.height) : null;
   const extremeImageRatio = anchorImageDimensions
     ? Math.max(anchorImageDimensions.width / anchorImageDimensions.height, anchorImageDimensions.height / anchorImageDimensions.width) > 2.4
@@ -498,8 +500,8 @@ export default function Home() {
       seed: seed.trim() ? Number(seed) : undefined,
       extraLoras: extraLoras.length ? extraLoras.map(({ name, strength }) => ({ name, strength })) : undefined,
       inputMode: sourceMode === "reference" ? "reference" : "standard",
-      sourceWidth: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.width : undefined,
-      sourceHeight: !continuationSource && sourceMode === "image" ? anchorImageDimensions?.height : undefined,
+      sourceWidth: !continuationSource ? videoImageDimensions?.width : undefined,
+      sourceHeight: !continuationSource ? videoImageDimensions?.height : undefined,
       outputWidth: continuationSource?.width,
       outputHeight: continuationSource?.height,
       continuationSource: continuationSource ? structuredClone(continuationSource) : undefined,
@@ -842,7 +844,7 @@ export default function Home() {
     setPrompt(video.prompt);
     setPromptBeforeOptimization(null);
     setOptimizedPromptMode(null);
-    setProfile(video.profile);
+    setProfile(video.profile === "cooled-fast" ? "fast" : video.profile);
     setResolution(video.resolution);
     setDuration(nextDuration);
     setAspect(video.aspect ?? aspectFromDimensions(video.width, video.height));
@@ -872,7 +874,7 @@ export default function Home() {
     setEnhancementMode(false);
     setContinuationSource(video);
     setSourceMode(video.inputMode === "reference" ? "reference" : "text");
-    setProfile(video.inputMode === "reference" ? "cooled-turbo-8" : "quality");
+    setProfile(video.inputMode === "reference" ? video.profile === "cooled-fast" ? "fast" : video.profile : "quality");
     setResolution(video.resolution);
     setSoundEnabled(video.sound);
     setPrompt("");
@@ -1250,20 +1252,19 @@ export default function Home() {
                   <label>
                     <span>模式</span>
                     <select value={profile} onChange={(event) => chooseProfile(event.target.value as GenerationOptions["profile"])} disabled={Boolean(continuationSource)}>
+                      {profile === "low-vram" && <option value="low-vram" hidden disabled>舊設定 · {sourceMode === "reference" ? 8 : 6}步（merge）</option>}
                       {sourceMode === "reference" ? (
                         <>
-                          <option value="cooled-turbo-8">COOLED TURBO 8 · Turbo 8 步／每步降溫</option>
-                          <option value="cooled-turbo-4">COOLED TURBO 4 · Turbo 4 步／每步降溫</option>
-                          <option value="low-vram">低顯存 · Turbo 8 步／LoRA merge</option>
+                          <option value="cooled-turbo-4">4步</option>
+                          <option value="fast">6步</option>
+                          <option value="cooled-turbo-8">8步</option>
                         </>
                       ) : (
                         <>
-                          <option value="fast">FAST · Turbo 6 步</option>
-                          <option value="cooled-fast">COOLED FAST · Turbo 6 步／分段降溫</option>
-                          <option value="cooled-turbo-8">COOLED TURBO 8 · Turbo 8 步／每步降溫</option>
-                          <option value="cooled-turbo-4">COOLED TURBO 4 · Turbo 4 步／每步降溫</option>
+                          <option value="cooled-turbo-4">4步</option>
+                          <option value="fast">6步</option>
+                          <option value="cooled-turbo-8">8步</option>
                           <option value="quality">QUALITY · 原生 20 步／每步降溫</option>
-                          <option value="low-vram">低顯存 · Turbo 6 步／LoRA merge</option>
                           <option value="safe-long">安全長片 · 低解析生成／480P 輸出</option>
                         </>
                       )}
@@ -1303,6 +1304,10 @@ export default function Home() {
                     ) : sourceMode === "image" ? (
                       <select value="auto" disabled>
                         <option value="auto">依照圖片{imageAspect ? ` · ${imageAspect}` : ""}</option>
+                      </select>
+                    ) : sourceMode === "reference" && firstImageFile ? (
+                      <select value="first-frame" disabled>
+                        <option value="first-frame">依照首幀圖{firstImageDimensions ? ` · ${formatAspect(firstImageDimensions.width, firstImageDimensions.height)}` : " · 讀取中"}</option>
                       </select>
                     ) : sourceMode === "reference" ? (
                       <select value={aspect} onChange={(event) => setAspect(event.target.value as GenerationOptions["aspect"])}>
@@ -1368,11 +1373,11 @@ export default function Home() {
               <div className="setting-note">
                 輸出 {outputSize} · 24 FPS · {soundEnabled ? "原生立體聲" : "無音軌（略省資源）"}
                 {continuationSource && <span> · 延伸第 {(continuationSource.clipIndex ?? 1) + 1} 段（接續內容約 {duration} 秒）</span>}
-                {sourceMode === "image" && firstImageDimensions && <span> · 首圖 {firstImageDimensions.width} × {firstImageDimensions.height}</span>}
+                {(sourceMode === "image" || sourceMode === "reference") && firstImageDimensions && <span> · 首圖 {firstImageDimensions.width} × {firstImageDimensions.height}</span>}
                 {sourceMode === "image" && lastImageDimensions && (
                   <span> · 尾圖 {lastImageDimensions.width} × {lastImageDimensions.height}{firstImageDimensions ? "（依首圖比例置中裁切）" : "（作為畫面比例基準）"}</span>
                 )}
-                {sourceMode === "reference" && <span> · Ref2VA W4A8 · {continuationSource?.inputMode === "reference" ? continuationSource.referenceFiles?.length ?? 0 : referenceImages.filter((reference) => reference.file).length} 張參考圖 · Turbo {profile === "cooled-turbo-4" ? 4 : 8} 步</span>}
+                {sourceMode === "reference" && <span> · Ref2VA W4A8 · {continuationSource?.inputMode === "reference" ? continuationSource.referenceFiles?.length ?? 0 : referenceImages.filter((reference) => reference.file).length} 張參考圖 · Turbo {referenceVideoSteps(profile)} 步</span>}
                 <span> · 每步降溫 {cooldownSeconds} 秒 ×{cooldownSteps} 步 ≈ {cooldownSeconds * cooldownSteps} 秒冷卻</span>
                 {profile === "safe-long" && <span> · 安全長片會低解析生成，再以 CPU 放大為 480P；畫面較柔且不支援延伸</span>}
                 {profile === "low-vram" && <span> · Turbo LoRA 改用 merge 模式，省下採樣時最大的一筆顯存配置；長片較不易爆顯存，畫面略柔</span>}
@@ -1459,7 +1464,7 @@ export default function Home() {
                         </select>
                       </label>
                       <label>
-                        <span>LoRA 強度 · {(qwenCamera.strength ?? 1).toFixed(2)}</span>
+                        <span>LoRA 強度 · {(qwenCamera.strength ?? 1).toFixed(2)} <small>（建議 0.8）</small></span>
                         <input type="range" aria-label="攝影機 LoRA 強度" min={0} max={1} step={0.05} value={qwenCamera.strength ?? 1} onChange={(event) => setQwenCamera({ ...qwenCamera, strength: Number(event.target.value) })} disabled={isOptimizing} />
                       </label>
                     </div>
@@ -1956,7 +1961,7 @@ function ImageGrid({ videos, onDelete, onRedo, onReuseSeed, emptyText }: ImageGr
         const src = outputUrl(image);
         const key = `${image.subfolder}/${image.filename}`;
         return (
-          <article className="video-card" key={key}>
+          <article className="video-card image-card" key={key}>
             {/* Local ComfyUI output served from localhost; next/image optimization is unnecessary. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <a href={src} target="_blank" rel="noreferrer"><img src={src} alt={image.prompt ?? image.filename} loading="lazy" /></a>
@@ -1965,12 +1970,16 @@ function ImageGrid({ videos, onDelete, onRedo, onReuseSeed, emptyText }: ImageGr
                 <span title={image.filename}>{image.filename}</span>
                 {image.generationSeconds !== undefined && <small>耗時 {image.generationSeconds} 秒</small>}
                 {image.width && image.height ? <small>{image.width} × {image.height}</small> : null}
-                {image.model === "qwen-image-2.1" && <small>Qwen-Image 2.1{image.steps ? ` · ${image.steps} 步` : ""}{image.qwenFast ? " · EasyCache" : ""}</small>}
-                {image.seed !== undefined && (
-                  <small className="seed-line">
-                    種子 <code>{image.seed}</code>
-                    <button type="button" onClick={() => onReuseSeed(image.seed!, image)}>沿用</button>
-                  </small>
+                {(image.model === "qwen-image-2.1" || image.seed !== undefined) && (
+                  <div className="image-generation-info">
+                    {image.model === "qwen-image-2.1" && <small>Qwen-Image 2.1{image.steps ? ` · ${image.steps} 步` : ""}{image.qwenFast ? " · EasyCache" : ""}</small>}
+                    {image.seed !== undefined && (
+                      <small className="seed-line">
+                        種子 <code>{image.seed}</code>
+                        <button type="button" onClick={() => onReuseSeed(image.seed!, image)}>沿用</button>
+                      </small>
+                    )}
+                  </div>
                 )}
               </div>
               <div className="card-actions">
