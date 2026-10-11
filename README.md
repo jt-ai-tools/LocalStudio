@@ -9,7 +9,7 @@ Windows 本機版 MiniMax H3 影片製作介面。影片、Qwen 圖像與 SeedVR
 - 參考圖轉影片（Ref2VA），最多 9 個參考項目，每項可設圖片、`@標籤` 與說明
 - 影片延伸：沿用原本的人物與場景，接續前一段的最後畫面，裁掉重疊幀後合併
 - 官方 H3 Prompt 優化：把一句白話描述改寫成 MiniMax 官方格式，可選 Codex 或 Grok 執行
-- 圖像編輯（Qwen-Image 2.1）：文字生圖，或上傳最多 4 張圖後用一句指令編輯，支援 7 種比例與 2K
+- 圖像編輯（Qwen-Image 2.1）：原版、Noct Q V4、REDQW21 UNLOCKED V2 三種主模型可切換；文字生圖或上傳最多 4 張圖編輯，支援 7 種比例與 2K。編輯預設依第一張圖比例，指定比例時先裁切第一張圖
 - 語音生成（Gemini 3.8 TTS，雲端，可選）：文字轉 WAV，30 個預設聲線加上可搜尋、試聽的 Google 聲線庫
 - 攝影機視角：Qwen 圖像搭配 Multiple-Angles LoRA v2，支援方位、角度、景別與強度
 - 影片畫質提升：SeedVR2 3B INT8，另存 720p 作品，保留原比例、幀率與聲音
@@ -21,6 +21,8 @@ Windows 本機版 MiniMax H3 影片製作介面。影片、Qwen 圖像與 SeedVR
 # 這個倉庫不包含什麼
 
 **這一節最重要。** 倉庫提供原始碼，不包含 ComfyUI、執行環境及模型。完整 H3 七個模型約 **54.2 GiB**；加上 Qwen、攝影機 LoRA 與 SeedVR2，模型合計約 **74.3 GiB**（約 80 GB），還需另外預留環境、下載快取、暫存影片與作品空間。
+
+上述大小使用 Qwen 原版；另加 Noct Q V4 與 REDQW21 V2 兩個可選主模型需約 **13.5 GiB**，三款都保留時模型合計約 **87.8 GiB**。
 
 | 缺少的東西 | 大小 | 為什麼不在倉庫裡 |
 |---|---:|---|
@@ -221,13 +223,30 @@ New-Item -ItemType Directory -Force -Path .\ComfyUI\models\diffusion_models, .\C
 
 ### Qwen 圖像編輯（可選）
 
-三項合計約 16.1 GiB。文字生圖、一般圖像編輯與攝影機視角都需要這三項。
+原版三項合計約 16.1 GiB。文字生圖、一般圖像編輯與攝影機視角需要一個圖像主模型、文字編碼器及 VAE；選用下方的微調模型時，只替換圖像主模型，文字編碼器及 VAE 沿用。
 
 | 本機檔名／下載連結 | 用途 | 放置目錄（專案根目錄起算） | 大小 GiB |
 |---|---|---|---:|
 | [`qwen_image_2.1_int8_convrot.safetensors`](https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/df94239739eef7205973a145ffa6f441f7b64e84/diffusion_models/qwen_image_2.1_int8_convrot.safetensors) | 圖像模型 | `ComfyUI/models/diffusion_models/` | 6.76 |
 | [`qwen3vl_8b_int8_convrot.safetensors`](https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/df94239739eef7205973a145ffa6f441f7b64e84/text_encoders/qwen3vl_8b_int8_convrot.safetensors) | 文字編碼器 | `ComfyUI/models/text_encoders/` | 8.71 |
 | [`qwen_image_2.1_vae_bf16.safetensors`](https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/df94239739eef7205973a145ffa6f441f7b64e84/vae/qwen_image_2.1_vae_bf16.safetensors) | 圖像 VAE | `ComfyUI/models/vae/` | 0.63 |
+
+### Noct Q V4／REDQW21 UNLOCKED V2（可選，2026-10-11 新增）
+
+兩款都是 Qwen-Image 2.1 的微調主模型，**不是 LoRA**，一次選一款。沿用上表的 `qwen3vl_8b_int8_convrot.safetensors` 與 `qwen_image_2.1_vae_bf16.safetensors`，放入 `ComfyUI/models/diffusion_models/`，在「圖像編輯 → 模型」選擇使用。模型權重不包含在本倉庫內。
+
+| 模型 | Studio 使用的本機檔名 | 下載來源 | 大小 GiB |
+|---|---|---|---:|
+| Noct Q V4 INT8 ConvRot | `NoctQ_V4_int8_convrot.safetensors` | [作者說明](https://huggingface.co/Noctaluna/Noct-Q-Uncensored-Qwen-Image-2.1)／[下載 INT8 ConvRot](https://huggingface.co/Noctaluna/Noct-Q-Uncensored-Qwen-Image-2.1/resolve/main/NoctQ_V4_int8_convrot.safetensors) | 6.76 |
+| REDQW21 UNLOCKED V2 INT8 | `REDQW21_V2_int8.safetensors` | [作者 V2 頁面](https://civitai.com/models/452459?modelVersionId=3370753)／[INT8 檔案，file ID 3258922](https://civitai.com/api/download/models/3370753?fileId=3258922) | 6.76 |
+
+REDQW21 下載要求登入 Civitai。請選 V2 的 **INT8** 檔案（約 7.26 GB／6.76 GiB），不要誤選 FP8、V1 或付費工作流。上游下載檔名可能是 `redgptK2T2W6A8REDQW21_redqw21UNLOCKEDV2_int8.safetensors`；**下載後改名為 `REDQW21_V2_int8.safetensors`**。Studio 會在 V2 上傳參考圖及提交工作前檢查模型是否已安裝。
+
+兩款均已在本機 ComfyUI v0.37.0／RTX 4080 Laptop 12 GB 上實際載入；V2 檔案已確認使用 INT8 ConvRot。Studio 沿用 Euler、simple、CFG 1、空白負面提示詞，步數預設 25；這是本機已驗證設定，不是作者效果的完整復現。Noct Q 作者另推薦 CFG 3 搭配負面提示詞；REDQW21 作者未公開完整採樣方案，其展示也包含額外後製工作流。
+
+目前 Studio 最多接受 **4 張參考圖**；REDQW21 作者工作流所稱的 10 張上限不代表本介面已支援。編輯可選「依照 `<image1>`」或七種指定比例：指定比例先置中裁切第一張參考圖，再交給模型編輯，不做補景擴圖。第一張圖的手動裁切框會鎖定指定比例，可調整要保留的構圖；其他參考圖不會被這項設定裁切。輸出尺寸對齊 32 像素，比例可能有些微差異。作品保存模型與編輯比例，載回設定時會還原。
+
+實測範圍與耗時見後面的效能章節；兩款的 2K、四圖參考與攝影機 LoRA 尚未實測。作者將這些衍生模型標示為研究／非商業用途，使用時仍須遵循各來源的授權。
 
 ### Qwen 攝影機視角（可選）
 
@@ -279,6 +298,8 @@ Get-FileHash ".\ComfyUI\models\loras\qwen_image_2.1_multiple_angles_v2_step1500.
 | `minimax_h3_video_vae_fp16.safetensors` | `7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522` |
 | `minimax_h3_turbo_v4_step600_ema.safetensors` | `5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3` |
 | `qwen_image_2.1_int8_convrot.safetensors` | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` |
+| `NoctQ_V4_int8_convrot.safetensors` | `4d92d5538253ab36e6a73b056cce5f697950f4303cb9e6686a3198d0ea13f9e8` |
+| `REDQW21_V2_int8.safetensors` | `30532b445eabd4b84b108168b6b3fe720535ef400f6bf9d68bd551817d3531a3` |
 | `qwen3vl_8b_int8_convrot.safetensors` | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` |
 | `qwen_image_2.1_vae_bf16.safetensors` | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
 | `qwen_image_2.1_multiple_angles_v2_step1500.safetensors` | `548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6` |
@@ -287,7 +308,7 @@ Get-FileHash ".\ComfyUI\models\loras\qwen_image_2.1_multiple_angles_v2_step1500.
 
 </details>
 
-校驗值取自以上固定 revision 的上游檔案資訊；攝影機 LoRA 的校驗值另已與本機檔案比對一致。模型下載與功能實測是兩個不同檢查，還需要後面的安裝驗證。
+校驗值取自以上指定來源的上游檔案資訊；攝影機 LoRA、Noct Q V4 與 REDQW21 V2 的校驗值另已與本機檔案比對一致。Noct Q 下載連結使用 `main`，請以上表 SHA256 確認版本。模型下載與功能實測是兩個不同檢查，還需要後面的安裝驗證。
 
 ## 步驟 8：安裝 FFmpeg
 
@@ -453,11 +474,19 @@ H3 Studio 的 `h3_studio_api.py` 會指名 `$h3-prompt-writing`，並由 `valida
 .\stop_h3_studio.bat
 ```
 
-只開 ComfyUI 不開介面：
+只開 ComfyUI 不開介面，也不自動開啟瀏覽器（8188 已被占用時不重複啟動）：
 
 ```powershell
 .\start_comfyui_h3.bat
 ```
+
+只停止本專案的 ComfyUI，保留 Studio 前端：
+
+```powershell
+.\stop_comfyui_h3.bat
+```
+
+這兩支 ComfyUI 腳本都接受 `--no-pause`，供自動執行時避免等待按鍵。要重新載入 Studio 後端程式或釋放模型快取，可先停止再啟動 ComfyUI；正在生成或排隊的 ComfyUI 工作會隨停止中斷。
 
 ---
 
@@ -619,6 +648,22 @@ RTX 4080 Laptop 12 GB，608×352、24fps、124 frames（5.2 秒）：
 每步實際運算不到 1 秒，時間大多是降溫；2K（4 MP）尚未在 12 GB 上實測。
 
 Qwen 最後一步後不再降溫（直接解碼存圖）；H3 每步降溫則包含最後一步。「加速」選 EasyCache 會跳過前後變化很小的步數，較快但細節可能略軟；速度差距尚未在 12 GB 上實測。
+
+### 2026-10-11：Noct Q V4／REDQW21 V2 實測
+
+同一台 RTX 4080 Laptop 12 GB，25 步、Euler／simple、CFG 1、降溫 0 秒、EasyCache 關閉。下表是各次 ComfyUI 工作記錄的執行時間，不包含下載與服務啟動；單次結果不是模型速度排名。
+
+| 模型 | 測試 | 輸出尺寸 | 執行時間 |
+|---|---|---|---:|
+| Noct Q V4 | 文字生圖 | 1024×1024 | 38 秒 |
+| Noct Q V4 | 單圖編輯，黃色雨衣改藍色 | 1024×1024 | 49 秒 |
+| Noct Q V4 | 指定 16:9，第一張圖置中裁切後改色 | 1376×768 | 51 秒 |
+| Noct Q V4 | 指定 9:16，第一張圖置中裁切後改色 | 768×1376 | 49 秒 |
+| REDQW21 V2 | 文字生圖 | 1024×1024 | 37 秒 |
+| REDQW21 V2 | 單圖編輯，黃色雨衣改藍色 | 1024×1024 | 49 秒 |
+| REDQW21 V2 | 雙圖參考，第一張人物／場景與第二張雨衣顏色 | 1024×1024 | 85 秒 |
+
+以上流程都成功輸出圖片，並確認模型版本可保存及讀回；指定編輯比例也完成保存驗證。一般人物與雨衣改色提示可用，但編輯可能改動臉部、構圖或背景，不能視為精確局部修改。兩款的 2K、四圖參考與攝影機 LoRA 尚未驗證，也未復現作者完整採樣／後製方案。
 
 ---
 

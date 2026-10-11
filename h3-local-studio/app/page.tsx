@@ -28,6 +28,8 @@ import {
   QWEN_MIN_COOLDOWN_SECONDS,
   QwenAspect,
   QwenSize,
+  QwenModel,
+  QWEN_MODELS,
   QwenCamera,
   QWEN_CAMERA_AZIMUTHS,
   QWEN_CAMERA_ELEVATIONS,
@@ -73,7 +75,7 @@ type QwenImageDraft = {
 };
 type CropTarget = { kind: "first" } | { kind: "last" } | { kind: "reference"; id: number } | { kind: "qwen"; id: number };
 
-const CROP_ASPECT: Record<GenerationOptions["aspect"], number> = { "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16 };
+const CROP_ASPECT: Record<QwenAspect, number> = { "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16, "3:2": 3 / 2, "2:3": 2 / 3 };
 
 const EXAMPLE_PROMPT =
   "電影感寫實風格，雨後黃昏的台北街道，一位穿深色風衣的人緩慢走過霓虹燈下，鏡頭低角度向前跟拍，水面倒影細緻，微風吹動衣角。環境音：細雨、遠方車流、輕柔低沉的配樂。不要文字、字幕、Logo 或浮水印。";
@@ -143,7 +145,9 @@ export default function Home() {
   const [qwenPrompt, setQwenPrompt] = useState("");
   const [qwenPromptBeforeOptimization, setQwenPromptBeforeOptimization] = useState<string | null>(null);
   const [qwenAspect, setQwenAspect] = useState<QwenAspect>("1:1");
+  const [qwenEditAspect, setQwenEditAspect] = useState<QwenAspect | "auto">("auto");
   const [qwenSize, setQwenSize] = useState<QwenSize>("1mp");
+  const [qwenModel, setQwenModel] = useState<QwenModel>("original");
   const [qwenSteps, setQwenSteps] = useState(QWEN_DEFAULT_STEPS);
   const [qwenSeed, setQwenSeed] = useState("");
   const [qwenCount, setQwenCount] = useState(1);
@@ -638,7 +642,8 @@ export default function Home() {
       return;
     }
     const options = {
-      prompt: qwenPrompt.trim(), aspect: qwenAspect, size: qwenSize, steps: qwenSteps,
+      prompt: qwenPrompt.trim(), aspect: qwenAspect, size: qwenSize, steps: qwenSteps, model: qwenModel,
+      editAspect: qwenImages.length && qwenEditAspect !== "auto" ? qwenEditAspect : undefined,
       seed: qwenSeed.trim() ? Number(qwenSeed) : undefined,
       cooldownSeconds: Math.max(QWEN_MIN_COOLDOWN_SECONDS, qwenCooldownSeconds),
       count: qwenCount,
@@ -906,7 +911,9 @@ export default function Home() {
     setQwenPrompt(image.qwenCamera ? "" : image.prompt);
     setQwenPromptBeforeOptimization(null);
     if (image.qwenAspect) setQwenAspect(image.qwenAspect);
+    setQwenEditAspect(image.qwenEditAspect ?? "auto");
     if (image.qwenSize) setQwenSize(image.qwenSize);
+    setQwenModel(image.qwenModel ?? "original");
     if (image.steps) setQwenSteps(image.steps);
     setQwenFast(image.qwenFast === true);
     setQwenCameraEnabled(Boolean(image.qwenCamera));
@@ -1406,7 +1413,7 @@ export default function Home() {
           <>
             <section className="composer" aria-label="圖像編輯設定">
               <div className="qwen-upload-section">
-                <p>{qwenCameraEnabled ? "上傳一張原圖後，透過下方的攝影機視角選項生成新的觀看角度。" : "不加圖片就是文字生圖；加了圖片後輸出會依第一張的比例，描述裡打 @ 就能挑要指定哪一張（插入 <image1>、<image2>）。"}</p>
+                <p>{qwenCameraEnabled ? "上傳一張原圖後，透過下方的攝影機視角選項生成新的觀看角度。" : "不加圖片就是文字生圖；加了圖片後預設依第一張的比例，也可在「畫面」指定比例並置中裁切。描述裡打 @ 就能挑要指定哪一張（插入 <image1>、<image2>）。"}</p>
                 <div className="qwen-image-grid">
                   {qwenImages.map((image, index) => (
                     <div className="qwen-image-slot" key={image.id}>
@@ -1540,20 +1547,28 @@ export default function Home() {
               <div className="composer-footer">
                 <div className="controls">
                   <label>
+                    <span>模型</span>
+                    <select value={qwenModel} onChange={(event) => setQwenModel(event.target.value as QwenModel)} aria-label="Qwen 圖像模型">
+                      {Object.entries(QWEN_MODELS).map(([value, model]) => (
+                        <option key={value} value={value}>{model.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
                     <span>畫面</span>
-                    {qwenImages.length ? (
-                      <select value="auto" disabled><option value="auto">依照 &lt;image1&gt;</option></select>
-                    ) : (
-                      <select value={qwenAspect} onChange={(event) => setQwenAspect(event.target.value as QwenAspect)}>
-                        <option value="1:1">1:1 方形</option>
-                        <option value="16:9">16:9 橫向</option>
-                        <option value="9:16">9:16 直向</option>
-                        <option value="3:2">3:2 橫向</option>
-                        <option value="2:3">2:3 直向</option>
-                        <option value="4:3">4:3 橫向</option>
-                        <option value="3:4">3:4 直向</option>
-                      </select>
-                    )}
+                    <select value={qwenImages.length ? qwenEditAspect : qwenAspect} onChange={(event) => {
+                      if (qwenImages.length) setQwenEditAspect(event.target.value as QwenAspect | "auto");
+                      else setQwenAspect(event.target.value as QwenAspect);
+                    }} aria-label="Qwen 輸出比例">
+                      {qwenImages.length > 0 && <option value="auto">依照 &lt;image1&gt;</option>}
+                      <option value="1:1">1:1 方形</option>
+                      <option value="16:9">16:9 橫向</option>
+                      <option value="9:16">9:16 直向</option>
+                      <option value="3:2">3:2 橫向</option>
+                      <option value="2:3">2:3 直向</option>
+                      <option value="4:3">4:3 橫向</option>
+                      <option value="3:4">3:4 直向</option>
+                    </select>
                   </label>
                   <label>
                     <span>尺寸</span>
@@ -1626,10 +1641,11 @@ export default function Home() {
 
               <div className="setting-note">
                 Qwen-Image 2.1 int8 · {qwenImages.length
-                  ? `${qwenImages.length} 張參考圖 · 依 <image1> 比例，約 ${qwenSize === "2k" ? 2048 : 1024} 像素`
+                  ? `${qwenImages.length} 張參考圖 · ${qwenEditAspect === "auto" ? "依 <image1> 比例" : `第一張置中裁切為 ${qwenEditAspect}`}，約 ${qwenSize === "2k" ? 2048 : 1024} 像素`
                   : `輸出 ${QWEN_DIMENSIONS[qwenSize][qwenAspect].join(" × ")}`}
                 <span> · {qwenSteps} 步 · 每步降溫 {qwenCooldownSeconds} 秒 ≈ {qwenCooldownSeconds * Math.max(0, qwenSteps - 1)} 秒冷卻（最後一步不休息）</span>
                 {qwenFast && <span> · EasyCache 會跳過變化小的步數，較快但細節可能略軟</span>}
+                {qwenImages.length > 0 && qwenEditAspect !== "auto" && <span> · 裁切會移除邊緣內容，可先用第一張圖的裁切工具調整構圖；輸出尺寸會對齊 32 像素</span>}
                 {qwenCooldownSeconds === 0 && <span> · 0 秒＝完全不降溫，長時間連跑請自行留意溫度</span>}
                 {qwenCount > 1 && <span> · {qwenCount} 張各自不同種子{qwenSeed.trim() ? `（${qwenSeed} 起連號）` : ""}，逐張生成</span>}
                 <span> · PNG 儲存到 ComfyUI/output/H3_Image</span>
@@ -1707,11 +1723,15 @@ export default function Home() {
             ? `裁切參考圖 ${cropReferenceIndex}`
             : cropTarget.kind === "first" ? "裁切首幀圖片" : "裁切尾幀圖片"}
           hint={cropTarget.kind === "qwen"
-            ? "只留下要參考的部分。參考圖會被縮到設定的像素量，裁得越準細節越多；<image1> 裁完的比例也會決定輸出圖的比例。"
+            ? cropReferenceIndex === 1 && qwenEditAspect !== "auto"
+              ? `裁切框鎖定 ${qwenEditAspect}，拖曳選擇要保留的構圖；第一張參考圖會決定輸出比例。`
+              : "只留下要參考的部分。參考圖會被縮到設定的像素量，裁得越準細節越多；預設依 <image1> 裁完的比例輸出。"
             : cropTarget.kind === "reference"
               ? "只留下要參考的部分，例如臉部。參考圖會被縮到與輸出畫面相同的像素量，所以裁得越準，臉的細節就越多。裁切比例不影響輸出畫面。"
               : `裁切框鎖定 ${aspect}，因為首尾圖的比例決定輸出影片的畫面比例。`}
-          aspect={cropTarget.kind === "reference" || cropTarget.kind === "qwen" ? undefined : CROP_ASPECT[aspect]}
+          aspect={cropTarget.kind === "qwen"
+            ? cropReferenceIndex === 1 && qwenEditAspect !== "auto" ? CROP_ASPECT[qwenEditAspect] : undefined
+            : cropTarget.kind === "reference" ? undefined : CROP_ASPECT[aspect]}
           onCancel={() => setCropTarget(null)}
           onApply={(rect) => void applyCrop(rect)}
         />
@@ -1972,7 +1992,7 @@ function ImageGrid({ videos, onDelete, onRedo, onReuseSeed, emptyText }: ImageGr
                 {image.width && image.height ? <small>{image.width} × {image.height}</small> : null}
                 {(image.model === "qwen-image-2.1" || image.seed !== undefined) && (
                   <div className="image-generation-info">
-                    {image.model === "qwen-image-2.1" && <small>Qwen-Image 2.1{image.steps ? ` · ${image.steps} 步` : ""}{image.qwenFast ? " · EasyCache" : ""}</small>}
+                    {image.model === "qwen-image-2.1" && <small>{QWEN_MODELS[image.qwenModel ?? "original"].label}{image.steps ? ` · ${image.steps} 步` : ""}{image.qwenFast ? " · EasyCache" : ""}</small>}
                     {image.seed !== undefined && (
                       <small className="seed-line">
                         種子 <code>{image.seed}</code>

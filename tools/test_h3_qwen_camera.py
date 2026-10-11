@@ -12,6 +12,22 @@ exec(compile(ast.Module(body=[node for node in tree.body if getattr(node, "name"
 
 
 class QwenCameraMetadataTests(unittest.TestCase):
+    def test_edit_aspect_roundtrip(self):
+        for aspect in ("1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4"):
+            metadata = namespace["validated_metadata"]({"model": "qwen-image-2.1", "qwenEditAspect": aspect})
+            self.assertEqual(metadata["qwenEditAspect"], aspect)
+        for aspect in (None, "auto", "invalid"):
+            metadata = namespace["validated_metadata"]({"model": "qwen-image-2.1", "qwenEditAspect": aspect})
+            self.assertNotIn("qwenEditAspect", metadata)
+
+    def test_model_selection_roundtrip(self):
+        for model in ("original", "noct-q-v4", "redqw21-v2"):
+            metadata = namespace["validated_metadata"]({"model": "qwen-image-2.1", "qwenModel": model})
+            self.assertEqual(metadata["qwenModel"], model)
+        for model in (None, "unknown"):
+            metadata = namespace["validated_metadata"]({"model": "qwen-image-2.1", "qwenModel": model})
+            self.assertNotIn("qwenModel", metadata)
+
     def test_camera_roundtrip_and_invalid_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

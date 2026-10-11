@@ -44,6 +44,8 @@ export type GeneratedVideo = {
   steps?: number;
   qwenAspect?: QwenAspect;
   qwenSize?: QwenSize;
+  qwenModel?: QwenModel;
+  qwenEditAspect?: QwenAspect;
   /** Qwen image sampled with EasyCache skipping near-duplicate steps. */
   qwenFast?: boolean;
   qwenCamera?: QwenCamera;
@@ -174,7 +176,17 @@ export function buildQwenCameraPrompt(camera: QwenCamera): string {
     + "Rephotograph the complete scene in <image1> from the requested viewpoint. Preserve the original environment, background objects, room layout, materials, lighting, and visual style, with perspective adjusted to the new camera position. Keep the subject's identity, clothing, and pose unchanged. Keep the subject in the original scene with its surrounding environment visible. Do not isolate the subject or replace the environment with a plain, grey, white, studio, or transparent background.";
 }
 
+export const QWEN_MODELS = {
+  original: { label: "Qwen-Image 2.1 原版", filename: "qwen_image_2.1_int8_convrot.safetensors" },
+  "noct-q-v4": { label: "Noct Q V4", filename: "NoctQ_V4_int8_convrot.safetensors" },
+  "redqw21-v2": { label: "REDQW21 UNLOCKED V2", filename: "REDQW21_V2_int8.safetensors" },
+} as const;
+export type QwenModel = keyof typeof QWEN_MODELS;
+
 export type QwenImageOptions = {
+  model?: QwenModel;
+  /** Center-crop the first reference before encoding; omitted keeps its ratio. */
+  editAspect?: QwenAspect;
   prompt: string;
   aspect: QwenAspect;
   /** Text-to-image canvas, or the pixel budget each reference image is resized to. */
@@ -521,7 +533,7 @@ export function buildQwenImageWorkflow(options: QwenImageOptions, uploadedImages
   const model = options.camera ? ["14", 0] : ["1", 0];
   const cooldown = Math.max(QWEN_MIN_COOLDOWN_SECONDS, options.cooldownSeconds);
   const graph: PromptGraph = {
-    "1": node("UNETLoader", { unet_name: "qwen_image_2.1_int8_convrot.safetensors", weight_dtype: "default" }, "Qwen-Image 2.1"),
+    "1": node("UNETLoader", { unet_name: QWEN_MODELS[options.model ?? "original"].filename, weight_dtype: "default" }, QWEN_MODELS[options.model ?? "original"].label),
     "2": node("CLIPLoader", { clip_name: "qwen3vl_8b_int8_convrot.safetensors", type: "qwen_image", device: "default" }, "Qwen3-VL 文字編碼器"),
     "3": node("VAELoader", { vae_name: "qwen_image_2.1_vae_bf16.safetensors" }, "Qwen VAE"),
     "4": node("TextEncodeQwenImage21", {
@@ -547,6 +559,14 @@ export function buildQwenImageWorkflow(options: QwenImageOptions, uploadedImages
       graph[nodeId] = node("LoadImage", { image }, `參考圖 ${index + 1}`);
       graph["4"].inputs[`images.image_${index + 1}`] = [nodeId, 0];
     });
+    if (options.editAspect) {
+      const [aspectWidth, aspectHeight] = options.editAspect.split(":").map(Number);
+      const scale = Math.round((options.size === "2k" ? 2048 : 1024) / Math.sqrt(aspectWidth * aspectHeight));
+      graph["15"] = node("ImageScale", {
+        image: ["300", 0], upscale_method: "lanczos", width: aspectWidth * scale, height: aspectHeight * scale, crop: "center",
+      }, `第一張參考圖置中裁切 · ${options.editAspect}`);
+      graph["4"].inputs["images.image_1"] = ["15", 0];
+    }
   } else {
     graph["5"] = node("EmptyLatentImage", { width, height, batch_size: 1 }, "空白畫布");
   }
@@ -1024,6 +1044,13 @@ export async function createQwenImage(
   onStatus: (status: string) => void,
   onImage?: (image: GeneratedVideo) => void,
 ) {
+  if (options.model === "redqw21-v2") {
+    onStatus("正在確認 REDQW21 V2 模型…");
+    const info = await (await request("/object_info/UNETLoader")).json();
+    const names: string[] = info.UNETLoader?.input?.required?.unet_name?.[0] ?? [];
+    const filename = QWEN_MODELS[options.model].filename;
+    if (!names.includes(filename)) throw new Error(`尚未安裝 REDQW21 V2：${filename}。請放入 ComfyUI/models/diffusion_models 後再生成。`);
+  }
   if (options.camera) {
     if (images.length !== 1) throw new Error("攝影機視角需要且只接受一張原圖。");
     buildQwenCameraPrompt(options.camera);
@@ -1074,6 +1101,8 @@ async function runQwenPrompt(options: QwenImageOptions, uploadedImages: string[]
     steps: options.steps,
     qwenAspect: options.aspect,
     qwenSize: options.size,
+    qwenModel: options.model ?? "original",
+    ...(uploadedImages.length && options.editAspect ? { qwenEditAspect: options.editAspect } : {}),
     ...(options.fast ? { qwenFast: true } : {}),
     ...(options.camera ? { qwenCamera: { ...options.camera, strength: options.camera.strength ?? 1 }, extraLoras: [{ name: QWEN_CAMERA_LORA, strength: options.camera.strength ?? 1 }] } : {}),
     seed,

@@ -155,8 +155,12 @@ def validated_metadata(data):
         metadata["height"] = data["height"]
     if data.get("model") == "qwen-image-2.1":
         metadata["model"] = data["model"]
+        if data.get("qwenModel") in {"original", "noct-q-v4", "redqw21-v2"}:
+            metadata["qwenModel"] = data["qwenModel"]
         if data.get("qwenAspect") in {"1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4"}:
             metadata["qwenAspect"] = data["qwenAspect"]
+        if data.get("qwenEditAspect") in {"1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4"}:
+            metadata["qwenEditAspect"] = data["qwenEditAspect"]
         if data.get("qwenSize") in {"1mp", "2k"}:
             metadata["qwenSize"] = data["qwenSize"]
         if data.get("qwenFast") is True:
